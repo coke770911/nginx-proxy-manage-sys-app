@@ -1,0 +1,11 @@
+{
+  "name": "nginx-ha-proxy-manager",
+  "private": true,
+  "description": "校園網域反向代理與 SSL 憑證集中管理系統",
+  "scripts": {
+    "setup-hooks": "git config core.hooksPath .githooks",
+    "version:next": "node scripts/version.js",
+    "version:test": "node scripts/version.js --test",
+    "release": "node scripts/release.js"
+  }
+}

@@ -1,0 +1,11 @@
+#!/bin/sh
+# 規則：push 前必須先升版號（npm run release），HEAD 需帶有 vX.Y.Z tag
+VERSION=$(tr -d ' \r\n' < VERSION)
+if ! git tag --points-at HEAD | grep -qx "v$VERSION"; then
+  echo ""
+  echo "✘ push 被阻擋：目前 HEAD 尚未升版號（缺少 tag v$VERSION）。"
+  echo "  請執行：npm run release   （自動升版、更新 README、commit、tag 並 push）"
+  echo ""
+  exit 1
+fi
+exit 0

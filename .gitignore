@@ -1,0 +1,24 @@
+# 相依套件與建置產物
+node_modules/
+dist/
+dist-demo/
+demo/
+
+# 機密設定（範例檔 .env.example 會保留）
+.env
+.env.*
+!.env.example
+
+# 金鑰與憑證
+keys/
+*.pem
+*.key
+*.pfx
+*.p12
+
+# 其他
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

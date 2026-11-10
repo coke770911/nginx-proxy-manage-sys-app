@@ -1,0 +1,16 @@
+#!/bin/sh
+# 規則：每次 commit 都必須同時更新 README.md
+# 緊急略過：SKIP_README_CHECK=1 git commit ...
+if [ "$SKIP_README_CHECK" = "1" ]; then
+  exit 0
+fi
+
+if ! git diff --cached --name-only | grep -qx "README.md"; then
+  echo ""
+  echo "✘ commit 被阻擋：本次 commit 沒有包含 README.md 的修改。"
+  echo "  請先更新 README（功能說明、設定或注意事項），再 git add README.md。"
+  echo "  緊急略過：SKIP_README_CHECK=1 git commit ..."
+  echo ""
+  exit 1
+fi
+exit 0
