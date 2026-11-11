@@ -11,6 +11,7 @@ const deployService = require('../services/deployService');
 const healthService = require('../services/healthService');
 const { fetchHostFingerprint } = require('../services/sshSession');
 const backendProbe = require('../services/backendProbe');
+const ruleImport = require('../services/ruleImport');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 3 } });
@@ -281,6 +282,91 @@ router.delete('/rules/:id', wrap(async (req, res) => {
   await rule.destroy(); // RuleUpstreams 由外鍵 ON DELETE CASCADE 一併刪除
   await audit.record(req, { action: 'DELETE', targetType: 'RULE', targetId: rule.Id, targetName: rule.DomainName, detail: { ...audit.snapshot(plain, RULE_FIELDS), Upstreams: upText(plain.Upstreams) } });
   res.json({ ok: true });
+}));
+
+/* ---------------------------------------------------------------- 匯入 / 匯出（CSV） */
+async function importContext() {
+  const [existing, certs] = await Promise.all([
+    DomainRule.findAll({ include: [withUpstreams], order: UP_ORDER }),
+    SslCertificate.findAll({ attributes: ['Id', 'Alias', 'SanDomains', 'ValidTo'] }),
+  ]);
+  return { existing: existing.map((r) => r.get({ plain: true })), certs: certs.map((c) => c.get({ plain: true })) };
+}
+
+const importSummary = (rows) => ({
+  total: rows.length,
+  error: rows.filter((r) => r.status === 'error').length,
+  duplicate: rows.filter((r) => r.status === 'duplicate').length,
+  exists: rows.filter((r) => r.status === 'exists').length,
+  create: rows.filter((r) => r.action === 'create').length,
+  update: rows.filter((r) => r.action === 'update').length,
+  skip: rows.filter((r) => r.action === 'skip').length,
+});
+
+/** 匯出全部規則為 CSV */
+router.get('/rules/export.csv', wrap(async (req, res) => {
+  const { existing, certs } = await importContext();
+  existing.sort((a, b) => a.DomainName.localeCompare(b.DomainName));
+  const name = `domain-rules-${new Date().toISOString().slice(0, 10)}.csv`;
+  res.set({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${name}"` });
+  res.send(ruleImport.toCsv(existing, certs));
+}));
+
+/**
+ * 匯入預覽（不寫入資料庫）
+ * body: { csv: '檔案文字' }  或  { rows: [...] }（刪除列 / 調整動作後重新檢查）
+ */
+router.post('/rules/import/preview', wrap(async (req, res) => {
+  let rows;
+  try {
+    if (typeof req.body?.csv === 'string') rows = ruleImport.rowsFromCsv(req.body.csv);
+    else if (Array.isArray(req.body?.rows)) rows = req.body.rows.slice(0, ruleImport.MAX_ROWS).map(ruleImport.cleanClientRow);
+    else throw new Error('請上傳 CSV 檔案');
+  } catch (e) { throw new HttpError(400, `檔案格式錯誤：${e.message}`); }
+  if (!rows.length) throw new HttpError(400, '檔案中沒有任何資料列');
+  const { existing, certs } = await importContext();
+  const analyzed = ruleImport.analyze(rows, existing, certs).map(({ merged, ...r }) => r); // eslint-disable-line no-unused-vars
+  res.json({ rows: analyzed, summary: importSummary(analyzed) });
+}));
+
+/** 確認匯入：伺服器重新檢查一次，有任何錯誤就整批不寫入；全部在同一個交易內完成 */
+router.post('/rules/import', wrap(async (req, res) => {
+  if (!Array.isArray(req.body?.rows) || !req.body.rows.length) throw new HttpError(400, '沒有要匯入的資料');
+  const rows = req.body.rows.slice(0, ruleImport.MAX_ROWS).map(ruleImport.cleanClientRow);
+  const { existing, certs } = await importContext();
+  const analyzed = ruleImport.analyze(rows, existing, certs);
+  const bad = analyzed.filter((r) => r.status === 'error');
+  if (bad.length) throw new HttpError(400, `仍有 ${bad.length} 列格式錯誤，未匯入任何資料：${bad.slice(0, 5).map((r) => `第 ${r.line} 列 ${r.errors[0]}`).join('；')}`);
+
+  const todo = analyzed.filter((r) => r.action === 'create' || r.action === 'update');
+  if (!todo.length) throw new HttpError(400, '沒有需要新增或覆蓋的規則（全部為略過）');
+  const done = [];
+  await sequelize.transaction(async (t) => {
+    for (const r of todo) {
+      const { Upstreams, ...fields } = r.merged;
+      const ups = Upstreams.map((u, i) => ({ ...u, SortOrder: i }));
+      if (r.action === 'create') {
+        const rule = await DomainRule.create({ ...fields, ...primaryOf(ups) }, { transaction: t });
+        await replaceUpstreams(rule.Id, ups, t);
+        done.push({ action: 'CREATE', id: rule.Id, domain: rule.DomainName, detail: { ...audit.snapshot(fields), Upstreams: upText(ups), 來源: 'CSV 匯入' } });
+      } else {
+        const rule = await DomainRule.findByPk(r.existingId, { include: [withUpstreams], transaction: t });
+        if (!rule) throw new HttpError(409, `第 ${r.line} 列要覆蓋的規則已不存在，請重新檢查`);
+        const before = { ...rule.get({ plain: true }) };
+        const beforeUps = (before.Upstreams || []).map((u) => ({ ...u }));
+        await rule.update({ ...fields, ...primaryOf(ups) }, { transaction: t });
+        await replaceUpstreams(rule.Id, ups, t);
+        const detail = { ...audit.diff(before, fields), 來源: 'CSV 匯入' };
+        if (upText(ups) !== upText(beforeUps)) detail.Upstreams = [upText(beforeUps), upText(ups)];
+        done.push({ action: 'UPDATE', id: rule.Id, domain: rule.DomainName, detail });
+      }
+    }
+  });
+  for (const d of done) {
+    // eslint-disable-next-line no-await-in-loop
+    await audit.record(req, { action: d.action, targetType: 'RULE', targetId: d.id, targetName: d.domain, detail: d.detail });
+  }
+  res.json({ created: done.filter((d) => d.action === 'CREATE').length, updated: done.filter((d) => d.action === 'UPDATE').length, skipped: analyzed.length - todo.length });
 }));
 
 /**

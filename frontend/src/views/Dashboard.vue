@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection } from '@element-plus/icons-vue';
+import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection, Download, Document } from '@element-plus/icons-vue';
 import api, { eventsUrl, session, logout } from '../api';
 
 /* ------------------------------------------------------------------ 資料 */
@@ -360,6 +360,135 @@ async function runProbe(title, request) {
     probeDlg.loading = false;
   }
 }
+/* ------------------------------------------------------------------ 規則匯入 / 匯出（CSV） */
+const IMPORT_TEMPLATE = [
+  '來源網域,後端主機,分配方式,Cookie名稱,SSL憑證,強制HTTPS,WebSocket,上傳上限,啟用,維護中,備註',
+  'portal.example.edu.tw,10.0.0.21:8080,,,,是,否,50M,是,否,單一後端',
+  'app.example.edu.tw,10.0.0.31:8080*3; 10.0.0.32:8080; 10.0.0.33:8080(備援),最少連線,,,是,否,100M,是,否,三台後端：權重 3:1，第三台為備援',
+  'erp.example.edu.tw,10.0.0.41:80; 10.0.0.42:80,依Cookie固定,JSESSIONID,,是,否,50M,是,否,登入狀態固定在同一台',
+].join('\r\n');
+const IMP_STATUS = {
+  new: { type: 'success', text: '新增' },
+  exists: { type: 'warning', text: '網域已存在' },
+  duplicate: { type: 'warning', text: '重複' },
+  error: { type: 'danger', text: '錯誤' },
+};
+const impDlg = reactive({ visible: false, step: 'pick', loading: false, saving: false, fileName: '', rows: [], error: '' });
+const dupDlg = reactive({ visible: false });
+const impSummary = computed(() => {
+  const r = impDlg.rows;
+  return {
+    total: r.length,
+    error: r.filter((x) => x.status === 'error').length,
+    duplicate: r.filter((x) => x.status === 'duplicate').length,
+    create: r.filter((x) => x.action === 'create').length,
+    update: r.filter((x) => x.action === 'update').length,
+    skip: r.filter((x) => x.action === 'skip').length,
+  };
+});
+const impDupRows = computed(() => impDlg.rows.filter((x) => x.status === 'duplicate'));
+
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+const downloadTemplate = () => downloadBlob(new Blob(['\uFEFF' + IMPORT_TEMPLATE + '\r\n'], { type: 'text/csv;charset=utf-8' }), '網域規則匯入範本.csv');
+async function exportRules() {
+  try {
+    const blob = await api.get('/rules/export.csv', { responseType: 'blob' });
+    downloadBlob(blob, `domain-rules-${new Date().toISOString().slice(0, 10)}.csv`);
+  } catch (e) { ElMessage.error(e.message); }
+}
+
+function openImport() {
+  Object.assign(impDlg, { visible: true, step: 'pick', loading: false, saving: false, fileName: '', rows: [], error: '' });
+}
+
+/** Excel 在中文 Windows 另存的 CSV 多為 Big5：先試 UTF-8，失敗再用 Big5 解碼 */
+function decodeText(buf) {
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return new TextDecoder('big5').decode(buf); }
+}
+
+async function onImportFile(e) {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  if (file.size > 900 * 1024) { impDlg.error = '檔案過大（上限約 900 KB / 500 筆）'; return; }
+  impDlg.fileName = file.name;
+  impDlg.error = '';
+  impDlg.loading = true;
+  try {
+    const csv = decodeText(await file.arrayBuffer());
+    const data = await api.post('/rules/import/preview', { csv });
+    impDlg.rows = data.rows;
+    impDlg.step = 'preview';
+  } catch (err) {
+    impDlg.error = err.message;
+  } finally {
+    impDlg.loading = false;
+  }
+}
+
+/** 刪除列或調整動作後重新檢查（重複 / 衝突狀態可能因此改變） */
+async function recheckImport() {
+  if (!impDlg.rows.length) { impDlg.step = 'pick'; return; }
+  impDlg.loading = true;
+  try {
+    const data = await api.post('/rules/import/preview', { rows: impDlg.rows });
+    impDlg.rows = data.rows;
+  } catch (err) {
+    ElMessage.error(err.message);
+  } finally {
+    impDlg.loading = false;
+  }
+}
+
+function removeImportRow(row) {
+  impDlg.rows = impDlg.rows.filter((x) => x !== row);
+  return recheckImport();
+}
+
+async function removeAllDuplicates() {
+  impDlg.rows = impDlg.rows.filter((x) => x.status !== 'duplicate');
+  dupDlg.visible = false;
+  await recheckImport();
+  if (impDlg.rows.length) await confirmImport(true);
+}
+
+/** 確認匯入：先處理重複，再做最後確認 */
+async function confirmImport(skipDupCheck = false) {
+  if (impSummary.value.error) return ElMessage.warning('請先刪除或修正有錯誤的列');
+  if (!skipDupCheck && impDupRows.value.length) { dupDlg.visible = true; return undefined; }
+  dupDlg.visible = false;
+  const { create, update, skip } = impSummary.value;
+  if (!create && !update) return ElMessage.warning('沒有需要新增或覆蓋的規則');
+  try {
+    await ElMessageBox.confirm(
+      `將新增 ${create} 筆、覆蓋 ${update} 筆${skip ? `、略過 ${skip} 筆` : ''}。匯入後需按「一鍵同步部署」才會推送到 Nginx 節點，確定匯入？`,
+      '確認匯入', { type: 'warning', confirmButtonText: '確定匯入', cancelButtonText: '取消' },
+    );
+  } catch { return undefined; }
+  impDlg.saving = true;
+  try {
+    const r = await api.post('/rules/import', { rows: impDlg.rows });
+    ElMessage.success(`匯入完成：新增 ${r.created} 筆、覆蓋 ${r.updated} 筆、略過 ${r.skipped} 筆（需按「一鍵同步部署」才會生效）`);
+    impDlg.visible = false;
+    await loadAll();
+  } catch (err) {
+    ElMessage.error(err.message);
+    await recheckImport();
+  } finally {
+    impDlg.saving = false;
+  }
+  return undefined;
+}
+
 const probeRule = (row) => runProbe(`測試後端連線：${row.DomainName}`, () => api.post(`/rules/${row.Id}/test-backends`));
 const probeForm = () => runProbe(`測試後端連線：${ruleDlg.form.DomainName || '（未儲存的規則）'}`,
   () => api.post('/rules/test-backends', { Upstreams: ruleDlg.form.Upstreams.map((u) => ({ ...u, Host: String(u.Host || '').trim() })) }));
@@ -550,6 +679,8 @@ onMounted(loadAll);
       <el-tab-pane label="網域對照規則" name="rules">
         <div class="toolbar">
           <el-button type="primary" :icon="Plus" @click="openRule(null)">新增規則</el-button>
+          <el-button :icon="Upload" @click="openImport">匯入</el-button>
+          <el-button :icon="Download" @click="exportRules">匯出</el-button>
           <el-input v-model="ruleQuery" :prefix-icon="Search" clearable placeholder="搜尋網域或後端 IP" class="search" />
           <span v-if="ruleQuery" class="hint">找到 {{ filteredRules.length }} / {{ rules.length }} 筆</span>
           <span class="hint">修改後需按右上角「一鍵同步部署」才會推送到 Nginx 節點。</span>
@@ -760,6 +891,121 @@ onMounted(loadAll);
           layout="total, sizes, prev, pager, next" background class="pager" @current-change="loadAudit()" @size-change="loadAudit(true)" />
       </el-tab-pane>
     </el-tabs>
+
+    <!-- 規則匯入 -->
+    <el-dialog v-model="impDlg.visible" title="匯入網域對照規則" :width="impDlg.step === 'preview' ? '1100px' : '620px'" top="5vh" class="rwd-dialog" :close-on-click-modal="false">
+      <div v-loading="impDlg.loading" element-loading-text="檢查中…">
+        <!-- 步驟 1：選檔 -->
+        <template v-if="impDlg.step === 'pick'">
+          <el-alert type="info" :closable="false" show-icon title="匯入流程：選擇 CSV 檔 → 檢查格式與重複 → 確認後才寫入（寫入後仍需「一鍵同步部署」）" />
+          <div class="imp-pick">
+            <label class="imp-file">
+              <input type="file" accept=".csv,.txt,text/csv" @change="onImportFile">
+              <el-icon :size="36"><UploadFilled /></el-icon>
+              <div>點這裡選擇 CSV 檔</div>
+              <div class="hint">UTF-8 或 Excel 另存的 CSV（Big5）皆可，最多 500 筆</div>
+            </label>
+            <el-alert v-if="impDlg.error" type="error" :closable="false" show-icon :title="impDlg.error" />
+          </div>
+          <div class="imp-help">
+            <div class="imp-help-title"><el-icon><Document /></el-icon> 欄位說明（第一列為標題）
+              <el-button size="small" text type="primary" :icon="Download" @click="downloadTemplate">下載範本</el-button>
+              <el-button size="small" text type="primary" :icon="Download" @click="exportRules">匯出目前規則</el-button>
+            </div>
+            <ul>
+              <li><b>來源網域</b>、<b>後端主機</b> 必填；後端多台以 <code>;</code> 分隔：<code>10.0.0.21:8080</code>、權重 <code>10.0.0.22:8080*3</code>、備援 <code>10.0.0.23:8080(備援)</code>、停用 <code>(停用)</code></li>
+              <li><b>分配方式</b>：輪流 / 最少連線 / 依Cookie固定（需填 <b>Cookie名稱</b>）；空白 = 輪流</li>
+              <li><b>SSL憑證</b>：憑證別名；空白會自動選涵蓋該網域、到期日最晚的憑證</li>
+              <li><b>強制HTTPS、WebSocket、啟用、維護中</b>：是 / 否；<b>上傳上限</b>：例 50M；<b>備註</b></li>
+              <li>空白欄位：新增時用預設值，覆蓋既有規則時保留原值；自訂 Nginx 語法不會被匯入覆蓋</li>
+              <li><b>重複</b> = 與既有規則或檔案中其他列「網域相同且後端 IP:Port 相同」，匯入前會提示，可刪除</li>
+            </ul>
+          </div>
+        </template>
+
+        <!-- 步驟 2：預覽與確認 -->
+        <template v-else>
+          <div class="imp-summary">
+            <span>檔案：<b>{{ impDlg.fileName }}</b>，共 {{ impSummary.total }} 列</span>
+            <el-tag type="success">新增 {{ impSummary.create }}</el-tag>
+            <el-tag type="warning">覆蓋 {{ impSummary.update }}</el-tag>
+            <el-tag type="info">略過 {{ impSummary.skip }}</el-tag>
+            <el-tag v-if="impSummary.duplicate" type="warning" effect="dark">重複 {{ impSummary.duplicate }}</el-tag>
+            <el-tag v-if="impSummary.error" type="danger" effect="dark">錯誤 {{ impSummary.error }}</el-tag>
+          </div>
+          <el-alert v-if="impSummary.error" type="error" :closable="false" show-icon
+                    :title="`有 ${impSummary.error} 列格式錯誤：請刪除這些列，或修正檔案後重新選擇，才能匯入`" />
+          <el-alert v-else type="success" :closable="false" show-icon title="格式檢查通過，請確認下列內容後按「確認匯入」" />
+          <el-table :data="impDlg.rows" border size="small" max-height="52vh" style="width: 100%; margin-top: 10px"
+                    :row-class-name="({ row }) => 'imp-' + row.status">
+            <el-table-column prop="line" label="列" width="52" align="center" />
+            <el-table-column label="狀態" width="100" align="center">
+              <template #default="{ row }"><el-tag size="small" :type="IMP_STATUS[row.status].type">{{ IMP_STATUS[row.status].text }}</el-tag></template>
+            </el-table-column>
+            <el-table-column prop="DomainName" label="來源網域" min-width="170" show-overflow-tooltip />
+            <el-table-column label="後端主機" min-width="200">
+              <template #default="{ row }">
+                <div class="imp-backends">{{ row.BackendsText || '—' }}</div>
+                <div v-if="row.existingBackends && row.status !== 'error'" class="hint">目前：{{ row.existingBackends }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="分配 / 憑證" min-width="150">
+              <template #default="{ row }"><div>{{ row.LbText }}</div><div class="hint">{{ row.CertAlias || '—' }}</div></template>
+            </el-table-column>
+            <el-table-column label="動作" width="120" align="center">
+              <template #default="{ row }">
+                <el-select v-if="row.existingId && row.status !== 'error' && row.duplicateOf?.type !== 'file'" v-model="row.action" size="small">
+                  <el-option value="update" label="覆蓋更新" />
+                  <el-option value="skip" label="略過" />
+                </el-select>
+                <span v-else-if="row.action === 'create'">新增</span>
+                <span v-else-if="row.action === 'skip'" class="hint">略過</span>
+                <span v-else class="hint">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="檢查結果" min-width="260">
+              <template #default="{ row }">
+                <div v-for="(m, i) in row.errors" :key="'e' + i" class="imp-err">✖ {{ m }}</div>
+                <div v-if="row.duplicateOf" class="imp-warn">⚠ {{ row.duplicateOf.text }}</div>
+                <div v-if="row.status === 'exists'" class="imp-warn">⚠ 網域已存在（後端不同），請選擇覆蓋或略過</div>
+                <div v-for="(m, i) in row.warnings" :key="'w' + i" class="imp-warn">⚠ {{ m }}</div>
+                <span v-if="row.status === 'new' && !row.warnings.length" class="imp-ok">✔ 正確</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="" width="56" align="center" fixed="right">
+              <template #default="{ row }"><el-button size="small" type="danger" :icon="Delete" circle text title="從匯入清單刪除此列" @click="removeImportRow(row)" /></template>
+            </el-table-column>
+          </el-table>
+        </template>
+      </div>
+      <template #footer>
+        <el-button v-if="impDlg.step === 'preview'" @click="impDlg.step = 'pick'; impDlg.rows = []">重新選擇檔案</el-button>
+        <el-button @click="impDlg.visible = false">取消</el-button>
+        <el-button v-if="impDlg.step === 'preview'" type="primary" :loading="impDlg.saving"
+                   :disabled="impDlg.loading || !!impSummary.error || !(impSummary.create + impSummary.update)" @click="confirmImport()">確認匯入</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 匯入前：重複提示 -->
+    <el-dialog v-model="dupDlg.visible" title="發現重複的規則" width="680px" class="rwd-dialog" append-to-body>
+      <el-alert type="warning" :closable="false" show-icon
+                :title="`以下 ${impDupRows.length} 列與既有規則或檔案中其他列「網域相同且後端 IP:Port 相同」，可刪除後再匯入`" />
+      <el-table :data="impDupRows" border size="small" style="width: 100%; margin-top: 10px" max-height="45vh">
+        <el-table-column prop="line" label="列" width="52" align="center" />
+        <el-table-column prop="DomainName" label="來源網域" min-width="160" />
+        <el-table-column prop="BackendsText" label="後端主機" min-width="160" />
+        <el-table-column label="重複對象" min-width="200"><template #default="{ row }"><span class="imp-warn">{{ row.duplicateOf.text }}</span></template></el-table-column>
+        <el-table-column label="處理" width="90" align="center">
+          <template #default="{ row }"><el-button size="small" type="danger" :icon="Delete" @click="removeImportRow(row)">刪除</el-button></template>
+        </el-table-column>
+      </el-table>
+      <div class="form-hint">保留的重複列：與既有規則重複者依「動作」欄覆蓋更新其他欄位（例如備註）或略過；與檔案內其他列重複者一律略過。</div>
+      <template #footer>
+        <el-button @click="dupDlg.visible = false">返回檢查</el-button>
+        <el-button type="danger" @click="removeAllDuplicates">刪除全部重複列並繼續</el-button>
+        <el-button type="primary" @click="confirmImport(true)">保留並繼續匯入</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 後端連線測試結果 -->
     <el-dialog v-model="probeDlg.visible" :title="probeDlg.title" width="720px" class="rwd-dialog" append-to-body>
@@ -1018,6 +1264,21 @@ onMounted(loadAll);
 .probe-meta { margin-left: 8px; font-size: 12px; color: #909399; line-height: 1.5; }
 div.probe-meta { margin: 4px 0 0; }
 .probe-err { margin-top: 8px; }
+.imp-pick { margin: 14px 0; display: grid; gap: 10px; }
+.imp-file { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 26px 16px; border: 2px dashed #c0c4cc; border-radius: 10px; cursor: pointer; color: #606266; text-align: center; }
+.imp-file:hover { border-color: #409eff; color: #409eff; }
+.imp-file input { display: none; }
+.imp-help { background: #f7f8fa; border-radius: 8px; padding: 10px 14px; font-size: 13px; color: #4a5568; }
+.imp-help-title { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-weight: 600; }
+.imp-help ul { margin: 6px 0 0; padding-left: 18px; line-height: 1.8; }
+.imp-help code { background: #eceef2; padding: 0 4px; border-radius: 3px; }
+.imp-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.imp-backends { word-break: break-all; }
+.imp-err { color: #f56c6c; line-height: 1.6; }
+.imp-warn { color: #e6a23c; line-height: 1.6; }
+.imp-ok { color: #67c23a; }
+:deep(.el-table .imp-error) { --el-table-tr-bg-color: #fef0f0; }
+:deep(.el-table .imp-duplicate) { --el-table-tr-bg-color: #fdf6ec; }
 .audit-detail { white-space: pre-line; font-size: 12.5px; line-height: 1.5; color: #4a5568; max-height: 9em; overflow: auto; }
 .cert-cell { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
