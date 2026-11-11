@@ -2,7 +2,9 @@
 const express = require('express');
 const multer = require('multer');
 const { fn, col } = require('sequelize');
-const { ProxyNode, SslCertificate, DomainRule, DeployLog } = require('../models');
+const { Op } = require('sequelize');
+const { ProxyNode, SslCertificate, DomainRule, DeployLog, AuditLog } = require('../models');
+const audit = require('../services/auditService');
 const certService = require('../services/certService');
 const { validateRule, renderConf } = require('../services/nginxTemplate');
 const deployService = require('../services/deployService');
@@ -54,8 +56,10 @@ function checkNode(n) {
   if (!/^[a-z_][a-z0-9_-]{0,31}$/i.test(n.SshUser || '')) throw new HttpError(400, 'SSH 帳號格式不正確');
 }
 
+const nodeName = (n) => `${n.NodeName} (${n.IpAddress})`;
+
 router.get('/nodes', wrap(async (req, res) => {
-  res.json(await ProxyNode.findAll({ order: [['Id', 'ASC']] }));
+  res.json(await healthService.listNodes());
 }));
 
 router.post('/nodes/check', wrap(async (req, res) => {
@@ -78,7 +82,9 @@ router.post('/nodes', wrap(async (req, res) => {
   const data = cleanNode(pick(req.body, NODE_FIELDS));
   if ('IsActive' in data) data.IsActive = toBool(data.IsActive);
   checkNode({ SshPort: 22, SshUser: 'deployer', ...data });
-  res.status(201).json(await ProxyNode.create(data));
+  const node = await ProxyNode.create(data);
+  await audit.record(req, { action: 'CREATE', targetType: 'NODE', targetId: node.Id, targetName: nodeName(node), detail: audit.snapshot(data) });
+  res.status(201).json(node);
 }));
 
 router.put('/nodes/:id', wrap(async (req, res) => {
@@ -86,13 +92,18 @@ router.put('/nodes/:id', wrap(async (req, res) => {
   if (!node) throw new HttpError(404, '節點不存在');
   const data = cleanNode(pick(req.body, NODE_FIELDS));
   if ('IsActive' in data) data.IsActive = toBool(data.IsActive);
-  checkNode({ ...node.get({ plain: true }), ...data });
-  res.json(await node.update(data));
+  const before = { ...node.get({ plain: true }) };
+  checkNode({ ...before, ...data });
+  await node.update(data);
+  await audit.record(req, { action: 'UPDATE', targetType: 'NODE', targetId: node.Id, targetName: nodeName(node), detail: audit.diff(before, data) });
+  res.json(node);
 }));
 
 router.delete('/nodes/:id', wrap(async (req, res) => {
-  const n = await ProxyNode.destroy({ where: { Id: req.params.id } });
-  if (!n) throw new HttpError(404, '節點不存在');
+  const node = await ProxyNode.findByPk(req.params.id);
+  if (!node) throw new HttpError(404, '節點不存在');
+  await node.destroy();
+  await audit.record(req, { action: 'DELETE', targetType: 'NODE', targetId: node.Id, targetName: nodeName(node), detail: audit.snapshot(node.get({ plain: true }), NODE_FIELDS) });
   res.json({ ok: true });
 }));
 
@@ -107,6 +118,8 @@ const certMeta = (b) => ({
   ValidFrom: b.validFrom,
   ValidTo: b.validTo,
 });
+
+const certInfo = (c) => ({ Alias: c.Alias, SanDomains: c.SanDomains, Issuer: c.Issuer, Fingerprint: c.Fingerprint, ValidTo: c.ValidTo });
 
 router.get('/certificates', wrap(async (req, res) => {
   const [certs, counts] = await Promise.all([
@@ -125,6 +138,7 @@ router.post('/certificates', certUpload, wrap(async (req, res) => {
     throw new HttpError(409, '此憑證（相同指紋）已存在於憑證庫；若為續約請使用「更新憑證」。');
   }
   const row = await SslCertificate.create({ Alias: alias, ...certMeta(bundle) });
+  await audit.record(req, { action: 'CREATE', targetType: 'CERT', targetId: row.Id, targetName: row.Alias, detail: audit.snapshot(certInfo(row)) });
   res.status(201).json({ ...row.get({ plain: true }), CertPem: undefined, KeyPem: undefined, warnings: bundle.warnings });
 }));
 
@@ -137,15 +151,19 @@ router.put('/certificates/:id', certUpload, wrap(async (req, res) => {
   const uncovered = bound.filter((r) => !certService.certCoversDomain(bundle.sanDomains, r.DomainName)).map((r) => r.DomainName);
   if (uncovered.length) throw new HttpError(400, `新憑證未涵蓋已綁定的網域：${uncovered.join(', ')}`);
   const alias = String(req.body.alias || '').trim();
+  const before = certInfo(cert);
   await cert.update({ ...(alias ? { Alias: alias } : {}), ...certMeta(bundle) });
+  await audit.record(req, { action: 'RENEW', targetType: 'CERT', targetId: cert.Id, targetName: cert.Alias, detail: audit.diff(before, certInfo(cert)) });
   res.json({ ...cert.get({ plain: true }), CertPem: undefined, KeyPem: undefined, warnings: bundle.warnings });
 }));
 
 router.delete('/certificates/:id', wrap(async (req, res) => {
   const used = await DomainRule.count({ where: { CertificateId: req.params.id } });
   if (used) throw new HttpError(409, `此憑證仍被 ${used} 條網域規則使用，請先解除綁定`);
-  const n = await SslCertificate.destroy({ where: { Id: req.params.id } });
-  if (!n) throw new HttpError(404, '憑證不存在');
+  const cert = await SslCertificate.findByPk(req.params.id, { attributes: NO_PEM });
+  if (!cert) throw new HttpError(404, '憑證不存在');
+  await cert.destroy();
+  await audit.record(req, { action: 'DELETE', targetType: 'CERT', targetId: cert.Id, targetName: cert.Alias, detail: audit.snapshot(certInfo(cert)) });
   res.json({ ok: true });
 }));
 
@@ -186,20 +204,27 @@ router.get('/rules', wrap(async (req, res) => {
 router.post('/rules', wrap(async (req, res) => {
   const data = normalizeRule({ ClientMaxBodySize: '50M', ...pick(req.body, RULE_FIELDS) });
   await checkRule(data);
-  res.status(201).json(await DomainRule.create(data));
+  const rule = await DomainRule.create(data);
+  await audit.record(req, { action: 'CREATE', targetType: 'RULE', targetId: rule.Id, targetName: rule.DomainName, detail: audit.snapshot(data) });
+  res.status(201).json(rule);
 }));
 
 router.put('/rules/:id', wrap(async (req, res) => {
   const rule = await DomainRule.findByPk(req.params.id);
   if (!rule) throw new HttpError(404, '規則不存在');
   const data = normalizeRule(pick(req.body, RULE_FIELDS));
-  await checkRule({ ...rule.get({ plain: true }), ...data });
-  res.json(await rule.update(data));
+  const before = { ...rule.get({ plain: true }) };
+  await checkRule({ ...before, ...data });
+  await rule.update(data);
+  await audit.record(req, { action: 'UPDATE', targetType: 'RULE', targetId: rule.Id, targetName: rule.DomainName, detail: audit.diff(before, data) });
+  res.json(rule);
 }));
 
 router.delete('/rules/:id', wrap(async (req, res) => {
-  const n = await DomainRule.destroy({ where: { Id: req.params.id } });
-  if (!n) throw new HttpError(404, '規則不存在');
+  const rule = await DomainRule.findByPk(req.params.id);
+  if (!rule) throw new HttpError(404, '規則不存在');
+  await rule.destroy();
+  await audit.record(req, { action: 'DELETE', targetType: 'RULE', targetId: rule.Id, targetName: rule.DomainName, detail: audit.snapshot(rule.get({ plain: true }), RULE_FIELDS) });
   res.json({ ok: true });
 }));
 
@@ -252,8 +277,44 @@ router.post('/deploy', wrap(async (req, res) => {
     triggeredBy: String(req.user?.username || 'unknown').slice(0, 100),
     triggerIp: req.ip,
   });
+  await audit.record(req, {
+    action: 'DEPLOY', targetType: 'DEPLOY', targetId: result.logId, targetName: `部署紀錄 #${result.logId || '-'}`,
+    success: result.ok, detail: { status: result.status, message: result.message },
+  });
   // 失敗（含 nginx -t 失敗已回滾）回 422，body 內含 errorDetail（nginx -t 原始 stderr）供前端顯示
   res.status(result.ok ? 200 : 422).json(result);
+}));
+
+/* =============================================================== 操作紀錄 AuditLogs */
+// LIKE 的萬用字元 % _ [ 需跳脫成 [%] [_] [[]
+const likeEscape = (s) => s.replace(/[%_[]/g, (c) => `[${c}]`);
+
+router.get('/audit-logs', wrap(async (req, res) => {
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 50, 1), 200);
+  const where = {};
+  const q = String(req.query.q || '').trim().slice(0, 100);
+  if (q) {
+    const like = { [Op.like]: `%${likeEscape(q)}%` };
+    where[Op.or] = [{ Username: like }, { TargetName: like }, { ClientIp: like }, { Detail: like }];
+  }
+  if (audit.ACTIONS.includes(req.query.action)) where.Action = req.query.action;
+  if (audit.TARGETS.includes(req.query.targetType)) where.TargetType = req.query.targetType;
+  const date = (v) => { const d = v ? new Date(v) : null; return d && !Number.isNaN(d.getTime()) ? d : null; };
+  const from = date(req.query.from);
+  const to = date(req.query.to);
+  if (from || to) where.CreatedAt = { ...(from ? { [Op.gte]: from } : {}), ...(to ? { [Op.lt]: to } : {}) };
+  const { count, rows } = await AuditLog.findAndCountAll({
+    where, order: [['Id', 'DESC']], offset: (page - 1) * pageSize, limit: pageSize,
+  });
+  res.json({
+    total: count,
+    rows: rows.map((r) => {
+      const p = r.get({ plain: true });
+      try { p.Detail = p.Detail ? JSON.parse(p.Detail) : null; } catch (_) { /* 保留原字串 */ }
+      return p;
+    }),
+  });
 }));
 
 /* =============================================================== 錯誤處理 */

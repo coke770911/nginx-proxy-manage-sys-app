@@ -27,7 +27,7 @@ module.exports = {
     return v;
   })(),
   auth: {
-    // 特權帳號白名單（逗號分隔，不分大小寫）：必須在此名單內「且」通過 SOAP 驗證才能登入
+    // 特權帳號（逗號分隔，不分大小寫）：與「帳號管理」中啟用的帳號合併為可登入名單，且都需通過 SOAP 驗證
     adminAccounts: (process.env.ADMIN_ACCOUNTS || '')
       .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
     jwtSecret: process.env.JWT_SECRET || '',

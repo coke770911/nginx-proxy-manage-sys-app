@@ -113,6 +113,49 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_DeployLogs_StartedAt'
 GO
 
 /* ---------------------------------------------------------------------------
+   5. AuditLogs — 系統操作紀錄
+      Action: LOGIN / LOGIN_FAILED / CREATE / UPDATE / DELETE / RENEW / DEPLOY
+      TargetType: AUTH / RULE / CERT / NODE / DEPLOY
+      Detail: 變更內容 (JSON)，不含密碼、私鑰與憑證內容
+   --------------------------------------------------------------------------- */
+IF OBJECT_ID(N'dbo.AuditLogs', N'U') IS NULL
+CREATE TABLE dbo.AuditLogs (
+    Id          BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT PK_AuditLogs PRIMARY KEY,
+    CreatedAt   DATETIME2(3)         NOT NULL CONSTRAINT DF_AuditLogs_Created DEFAULT (SYSUTCDATETIME()),
+    Username    NVARCHAR(100)        NOT NULL,
+    ClientIp    NVARCHAR(64)         NULL,
+    Action      NVARCHAR(20)         NOT NULL,
+    TargetType  NVARCHAR(20)         NOT NULL,
+    TargetId    NVARCHAR(50)         NULL,
+    TargetName  NVARCHAR(300)        NULL,
+    Success     BIT                  NOT NULL CONSTRAINT DF_AuditLogs_Success DEFAULT (1),
+    Detail      NVARCHAR(MAX)        NULL,
+    CONSTRAINT CK_AuditLogs_Detail CHECK (Detail IS NULL OR ISJSON(Detail) = 1)
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_AuditLogs_CreatedAt')
+    CREATE INDEX IX_AuditLogs_CreatedAt ON dbo.AuditLogs (CreatedAt DESC);
+GO
+
+/* ---------------------------------------------------------------------------
+   6. AdminAccounts — 可登入帳號（介面「帳號管理」維護）
+      可登入名單 = 此表 IsActive = 1 的帳號 ∪ .env ADMIN_ACCOUNTS；密碼一律由 SOAP 驗證，不存密碼
+   --------------------------------------------------------------------------- */
+IF OBJECT_ID(N'dbo.AdminAccounts', N'U') IS NULL
+CREATE TABLE dbo.AdminAccounts (
+    Id          INT IDENTITY(1,1)    NOT NULL CONSTRAINT PK_AdminAccounts PRIMARY KEY,
+    Username    NVARCHAR(100)        NOT NULL CONSTRAINT UQ_AdminAccounts_Username UNIQUE,
+    DisplayName NVARCHAR(100)        NULL,
+    IsActive    BIT                  NOT NULL CONSTRAINT DF_AdminAccounts_Active DEFAULT (1),
+    Remark      NVARCHAR(300)        NULL,
+    CreatedBy   NVARCHAR(100)        NULL,
+    LastLoginAt DATETIME2(3)         NULL,
+    CreatedAt   DATETIME2(3)         NOT NULL CONSTRAINT DF_AdminAccounts_Created DEFAULT (SYSUTCDATETIME()),
+    UpdatedAt   DATETIME2(3)         NOT NULL CONSTRAINT DF_AdminAccounts_Updated DEFAULT (SYSUTCDATETIME())
+);
+GO
+
+/* ---------------------------------------------------------------------------
    初始資料：兩台 Ubuntu 24.04 節點範例（請依實際 IP 修改）
    憑證需透過系統「上傳憑證」功能匯入（需解析 PEM），故不在此預先建立。
    --------------------------------------------------------------------------- */

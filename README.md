@@ -9,21 +9,24 @@
 ├─ VERSION                      版號唯一來源（由 npm run release 維護）
 ├─ scripts/                     version.js 版號規則、release.js 發佈腳本
 ├─ .githooks/                   pre-commit（檢查 README）、pre-push（檢查版號 tag）
-├─ database/schema.sql          SQL Server DDL + 兩台節點範例資料
+├─ database/schema.sql          SQL Server DDL（6 張資料表）+ 兩台節點範例資料
 ├─ backend/                     Node.js + Express + Sequelize(mssql) + JWT
 │  ├─ public/                   前端編譯產物（frontend npm run build 自動輸出，不進版控）
 │  └─ src/
 │     ├─ app.js                 進入點（JWT 驗證、靜態檔、健康檢查排程，單一 port）
-│     ├─ config/ db/ models/    設定、連線、4 張資料表 Model
+│     ├─ config/ db/ models/    設定、連線、6 張資料表 Model
 │     ├─ routes/authRoutes.js   登入 API、JWT 驗證中介層、登入失敗鎖定
-│     ├─ routes/proxyRoutes.js  REST API + SSE 即時 Log
+│     ├─ routes/proxyRoutes.js  REST API + SSE 即時 Log + 操作紀錄查詢
+│     ├─ routes/accountRoutes.js 帳號管理 API
 │     └─ services/
 │        ├─ soapAuth.js         SOAP 帳號密碼驗證
+│        ├─ accountService.js   可登入名單（資料庫帳號 + .env 特權帳號）
+│        ├─ auditService.js     系統操作紀錄寫入（不含密碼 / 私鑰）
 │        ├─ certService.js      憑證解析 / 公私鑰比對 / PFX 轉檔
 │        ├─ nginxTemplate.js    .conf 生成器（含欄位白名單驗證）
 │        ├─ sshSession.js       SSH+SFTP 連線封裝（可驗證主機金鑰）
 │        ├─ deployService.js    雙機兩階段部署與回滾引擎
-│        └─ healthService.js    節點燈號（SSH + nginx active）
+│        └─ healthService.js    節點燈號（SSH + nginx active）與 CPU / RAM / 硬碟使用率
 └─ frontend/                    Vue 3 + Vite + Element Plus（views/Login.vue、views/Dashboard.vue）
 ```
 
@@ -31,7 +34,7 @@
 
 ```bash
 # 1. 建資料庫（SSMS 或 sqlcmd 執行）
-sqlcmd -S <host> -U sa -i database/schema.sql
+sqlcmd -S <host> -U sa -i database/schema.sql   # 可重複執行；舊版升級時再跑一次即可補上新資料表
 
 # 2. 設定（Windows：copy backend\.env.example backend\.env）
 cp backend/.env.example backend/.env
@@ -51,14 +54,14 @@ npm start                            # 啟動後端：http://localhost:3000（�
 
 登入條件需**同時**滿足：
 
-1. 帳號列在 `backend/.env` 的 `ADMIN_ACCOUNTS`（特權帳號白名單，逗號分隔、不分大小寫）。
-2. 帳號密碼通過 `SOAP_URL` 指定的 SOAP 認證服務驗證。
+1. 帳號在**可登入名單**內：`backend/.env` 的 `ADMIN_ACCOUNTS`（特權帳號，逗號分隔、不分大小寫）**加上**「帳號管理」分頁中新增且啟用的帳號。
+2. 帳號密碼通過 `SOAP_URL` 指定的 SOAP 認證服務驗證（本系統不保存任何密碼）。
 
-登入成功後後端簽發 JWT（HS256，`JWT_SECRET` 簽章，有效時間 `JWT_EXPIRES_IN`），前端存於 `sessionStorage`，之後所有 API 以 `Authorization: Bearer <token>` 驗證；SSE 即時 Log 因 EventSource 無法帶標頭，改以 `?token=` 傳遞。每次請求都會重新比對白名單，帳號從 `ADMIN_ACCOUNTS` 移除並重啟後端後，已簽發的 Token 立即失效。部署紀錄的「操作者」會記錄登入帳號。
+登入成功後後端簽發 JWT（HS256，`JWT_SECRET` 簽章，有效時間 `JWT_EXPIRES_IN`），前端存於 `sessionStorage`，之後所有 API 以 `Authorization: Bearer <token>` 驗證；SSE 即時 Log 因 EventSource 無法帶標頭，改以 `?token=` 傳遞。每次請求都會重新比對可登入名單：在「帳號管理」停用或刪除帳號後，該帳號下一次操作即失去權限；從 `ADMIN_ACCOUNTS` 移除則需重啟後端。部署紀錄的「操作者」會記錄登入帳號。
 
 | 設定 | 說明 |
 |---|---|
-| `ADMIN_ACCOUNTS` | 特權帳號白名單，例：`admin01,netops` |
+| `ADMIN_ACCOUNTS` | 特權帳號，例：`admin01,netops`；至少填一個，才能第一次登入並到「帳號管理」新增其他人 |
 | `JWT_SECRET` | 至少 32 字元，未設定則後端拒絕啟動；更換後所有人需重新登入 |
 | `JWT_EXPIRES_IN` | Token 有效時間，例：`30m`、`8h` |
 | `LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES` | 同一 IP + 帳號連續失敗次數上限與鎖定分鐘數 |
@@ -71,6 +74,43 @@ npm start                            # 啟動後端：http://localhost:3000（�
 
 - 不在白名單的帳號不會送往 SOAP 服務，但回應訊息與密碼錯誤相同，避免帳號被列舉。
 - SOAP 回應為 SOAP Fault 或 HTTP 狀態非 200 一律視為驗證失敗；服務無法連線時回 502。
+
+## 帳號管理
+
+「帳號管理」分頁維護可登入名單（資料表 `AdminAccounts`）：
+
+- **新增帳號**後該帳號才能登入；帳號需與 SOAP 認證使用的帳號相同，可填姓名 / 單位與備註。
+- 可**停用**或**刪除**帳號，立即生效（不需重啟）；不能停用或刪除自己目前登入的帳號。
+- `.env` 的 `ADMIN_ACCOUNTS` 帳號一併列出並標示「.env 特權」，介面上唯讀，只能改 `.env` 後重啟。
+- 顯示每個帳號的最後登入時間與建立者；新增、修改、刪除都會寫入操作紀錄。
+
+## 操作紀錄
+
+「操作紀錄」分頁（資料表 `AuditLogs`）記錄誰在何時、從哪個 IP 做了什麼：
+
+| 動作 | 記錄內容 |
+|---|---|
+| 登入 / 登入失敗 | 帳號、來源 IP、失敗原因（密碼錯誤、不在可登入名單、暫時鎖定、認證服務錯誤） |
+| 新增 / 刪除 | 網域規則、SSL 憑證、Nginx 節點、帳號當下的內容 |
+| 修改 | 只列出有變動的欄位「舊值 → 新值」 |
+| 憑證續約 | 新舊憑證的指紋、到期日、涵蓋網域 |
+| 部署 | 對應的部署紀錄編號與結果 |
+
+- 可依關鍵字（帳號、對象、IP、內容）、動作、類別、日期區間查詢，並分頁顯示。
+- **不記錄**密碼、PFX 密碼、私鑰與憑證內容；超過 300 字的欄位（例如自訂 Nginx 語法）會截斷。
+- 紀錄寫入失敗只會記在後端 console，不影響原本的操作。
+
+## 節點資源監控
+
+節點卡片顯示每台節點的 **CPU、RAM、硬碟（`/`）使用率**，滑鼠移到該列可看核心數、負載、Swap 與硬碟容量：
+
+- 每次健康檢查（`HEALTH_INTERVAL_SEC`，預設 60 秒，或按卡片旁的重新檢測）時，用同一條 SSH 連線讀取 `/proc/stat`、`/proc/meminfo`、`/proc/loadavg` 與 `df`，**不需要 sudo**。
+- 使用率低於 70% 綠色、70–90% 黃色、超過 90% 紅色。上傳大檔時 Nginx 會把請求暫存到 `/var/lib/nginx`，請特別注意硬碟剩餘空間。
+- 數據只保存在記憶體，後端重啟後要等下一次檢查才會出現；停用的節點不顯示。
+
+## 網域規則搜尋
+
+「網域對照規則」分頁上方的搜尋框可用**來源網域**或**後端 IP / Port** 即時過濾（例如 `portal`、`10.0.0.21`、`:8080`），並顯示符合筆數。
 
 ## Ubuntu 節點事前準備（兩台皆需）
 
@@ -122,7 +162,7 @@ sudo chmod 750 /etc/nginx/ssl
 - **私鑰存放**：`KeyPem` 以明文存於 SQL Server，請限制 DB 存取，並建議啟用 TDE / 欄位加密；備份檔 `/tmp/nginx_backup.tar.gz` 含私鑰，權限為 600。
 - **真實客戶端 IP**：F5 為 L4 Passthrough，Nginx 看到的 `$remote_addr` 為 F5 位址（若有 SNAT）。要取得真實 IP 需 F5 不做 SNAT，或改用 PROXY protocol（Nginx 加 `listen ... proxy_protocol` 與 `real_ip` 設定）。
 - **`/f5-health-check`** 設於每個網域的 80/443 server；F5 以 IP 探測時會落到第一個 server block，仍會回 200。
-- **認證**：SOAP 帳密驗證 + `ADMIN_ACCOUNTS` 白名單 + JWT，詳見上方「登入與權限」；正式環境請以 HTTPS 提供本系統，避免帳密與 Token 以明文傳輸。
+- **認證**：SOAP 帳密驗證 + 可登入名單（帳號管理 + `ADMIN_ACCOUNTS`）+ JWT，詳見上方「登入與權限」；正式環境請以 HTTPS 提供本系統，避免帳密與 Token 以明文傳輸。
 - 版本相容：HTTP/2 寫法由 `.env` 的 `NGINX_HTTP2_SYNTAX` 決定。`modern`（預設）產生 `listen 443 ssl;` + `http2 on;`，適用 nginx ≥ 1.25.1（Ubuntu 26.04）；`legacy` 產生 `listen 443 ssl http2;`，適用 nginx 1.24（Ubuntu 24.04），在新版 nginx 上會出現過時警告。兩台節點請使用相同 Ubuntu 版本。
 - 自訂 Nginx 語法插入 443 server 區塊（位於 `location /` 之前），僅檢查大括號成對，語法正確性由 `nginx -t` 把關。
 - 憑證上傳對話框每次開啟都會重置檔案欄位（`destroy-on-close`），選取的 PEM / PFX 檔會正確帶入表單。

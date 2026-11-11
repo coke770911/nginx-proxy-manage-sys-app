@@ -6,6 +6,7 @@ const config = require('./config');
 const { sequelize } = require('./models');
 const proxyRoutes = require('./routes/proxyRoutes');
 const auth = require('./routes/authRoutes');
+const accountRoutes = require('./routes/accountRoutes');
 const healthService = require('./services/healthService');
 
 const app = express();
@@ -16,6 +17,7 @@ app.use(express.json({ limit: '1mb' }));
 
 app.get('/healthz', (req, res) => res.json({ ok: true }));
 app.use('/api/auth', auth.router);
+app.use('/api/accounts', auth.requireAuth, accountRoutes);
 app.use('/api', auth.requireAuth, proxyRoutes);
 app.use('/api', (req, res) => res.status(404).json({ message: '找不到此 API' }));
 
@@ -33,7 +35,7 @@ if (fs.existsSync(path.join(publicDir, 'index.html'))) {
     console.error('[auth] JWT_SECRET 未設定或長度不足 32 字元，請於 backend/.env 設定');
     process.exit(1);
   }
-  if (!config.auth.adminAccounts.length) console.warn('[auth] ADMIN_ACCOUNTS 未設定，目前沒有任何帳號可以登入');
+  if (!config.auth.adminAccounts.length) console.warn('[auth] ADMIN_ACCOUNTS 未設定，只有「帳號管理」中啟用的帳號可以登入');
   if (!config.soap.url) console.warn('[auth] SOAP_URL 未設定，登入驗證將無法使用');
   try {
     await sequelize.authenticate();

@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton } from '@element-plus/icons-vue';
+import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search } from '@element-plus/icons-vue';
 import api, { eventsUrl, session, logout } from '../api';
 
 /* ------------------------------------------------------------------ 資料 */
@@ -41,6 +41,15 @@ function certTag(validTo) {
 
 const LIGHT = { ONLINE: 'green', DEGRADED: 'yellow', OFFLINE: 'red', UNKNOWN: 'grey' };
 const HEALTH_TEXT = { ONLINE: '連線正常', DEGRADED: 'SSH 正常 / Nginx 異常', OFFLINE: '無法連線', UNKNOWN: '尚未檢測' };
+// 資源使用率：< 70% 綠、70–90% 黃、> 90% 紅
+const usageColor = (p) => (p >= 90 ? '#f56c6c' : p >= 70 ? '#e6a23c' : '#67c23a');
+const gb = (b) => (b >= 1024 ** 4 ? `${(b / 1024 ** 4).toFixed(1)} TB` : `${(b / 1024 ** 3).toFixed(1)} GB`);
+const resRows = (st) => [
+  st.cpu !== null && st.cpu !== undefined && { label: 'CPU', p: st.cpu, text: `${st.cpu}%`, tip: `${st.cores || '?'} 核心，負載 ${(st.load || []).join(' / ')}（1 / 5 / 15 分鐘）` },
+  st.mem && { label: 'RAM', p: st.mem.percent, text: `${gb(st.mem.used)} / ${gb(st.mem.total)}`, tip: st.swap ? `Swap ${gb(st.swap.used)} / ${gb(st.swap.total)}` : '無 Swap' },
+  st.disk && { label: '硬碟', p: st.disk.percent, text: `剩 ${gb(st.disk.free)}`, tip: `/ 已用 ${gb(st.disk.used)}，共 ${gb(st.disk.total)}` },
+].filter(Boolean);
+
 const lightClass = (n) => (n.IsActive ? LIGHT[n.HealthStatus] || 'grey' : 'off');
 
 const STATUS_TAG = {
@@ -50,6 +59,131 @@ const STATUS_TAG = {
   PARTIAL: { type: 'warning', text: '部分成功' },
   RUNNING: { type: 'info', text: '執行中' },
 };
+
+/* ------------------------------------------------------------------ 規則搜尋（網域 / IP） */
+const ruleQuery = ref('');
+const filteredRules = computed(() => {
+  const q = ruleQuery.value.trim().toLowerCase();
+  if (!q) return rules.value;
+  return rules.value.filter((r) => r.DomainName.toLowerCase().includes(q)
+    || `${r.TargetIp}:${r.TargetPort}`.toLowerCase().includes(q));
+});
+
+/* ------------------------------------------------------------------ 操作紀錄 */
+const AUDIT_ACTION = {
+  LOGIN: { type: 'success', text: '登入' },
+  LOGIN_FAILED: { type: 'danger', text: '登入失敗' },
+  CREATE: { type: 'primary', text: '新增' },
+  UPDATE: { type: 'warning', text: '修改' },
+  DELETE: { type: 'danger', text: '刪除' },
+  RENEW: { type: 'warning', text: '憑證續約' },
+  DEPLOY: { type: 'info', text: '部署' },
+};
+const AUDIT_TARGET = { AUTH: '登入', RULE: '網域規則', CERT: 'SSL 憑證', NODE: 'Nginx 節點', DEPLOY: '部署', ACCOUNT: '帳號管理' };
+const audit = reactive({ q: '', action: '', targetType: '', range: null, page: 1, pageSize: 50, total: 0, rows: [], loading: false });
+
+async function loadAudit(resetPage = false) {
+  if (resetPage) audit.page = 1;
+  audit.loading = true;
+  try {
+    const [from, to] = audit.range || [];
+    const params = { q: audit.q || undefined, action: audit.action || undefined, targetType: audit.targetType || undefined, page: audit.page, pageSize: audit.pageSize };
+    if (from) params.from = new Date(from).toISOString();
+    if (to) params.to = new Date(new Date(to).getTime() + 86400000).toISOString(); // 含結束當天
+    const data = await api.get('/audit-logs', { params });
+    audit.rows = data.rows;
+    audit.total = data.total;
+  } catch (e) {
+    ElMessage.error(e.message);
+  } finally {
+    audit.loading = false;
+  }
+}
+
+const FIELD_LABEL = {
+  DomainName: '來源網域', TargetIp: '後端 IP', TargetPort: '後端 Port', CertificateId: '憑證 ID', ForceHttps: '強制 HTTPS',
+  EnableWebSocket: 'WebSocket', ClientMaxBodySize: '上傳上限', IsActive: '啟用', IsMaintenance: '維護中頁面',
+  CustomNginxSnippet: '自訂 Nginx 語法', Remark: '備註', NodeName: '節點名稱', IpAddress: 'IP', SshPort: 'SSH Port',
+  SshUser: 'SSH 帳號', SshKeyPath: '私鑰路徑', HostKeySha256: '主機指紋', Alias: '別名', SanDomains: '涵蓋網域',
+  Issuer: '發行商', Fingerprint: '憑證指紋', ValidTo: '到期日', Username: '帳號', DisplayName: '姓名 / 單位',
+  reason: '原因', source: '帳號來源', status: '狀態', message: '訊息',
+};
+const auditDetail = (d) => {
+  if (!d) return '';
+  if (typeof d === 'string') return d;
+  return Object.entries(d).map(([k, v]) => (Array.isArray(v) && v.length === 2
+    ? `${FIELD_LABEL[k] || k}：${fmtVal(v[0])} → ${fmtVal(v[1])}`
+    : `${FIELD_LABEL[k] || k}：${fmtVal(v)}`)).join('\n');
+};
+const fmtVal = (v) => (v === null || v === undefined || v === '' ? '（空）' : typeof v === 'boolean' ? (v ? '是' : '否') : String(v));
+
+/* ------------------------------------------------------------------ 登入帳號管理 */
+const accounts = ref([]);
+const accountsLoading = ref(false);
+const blankAccount = () => ({ Username: '', DisplayName: '', Remark: '', IsActive: true });
+const accDlg = reactive({ visible: false, id: null, saving: false, form: blankAccount() });
+const accFormRef = ref();
+const accRules = {
+  Username: [
+    { required: true, message: '請輸入帳號', trigger: 'blur' },
+    { pattern: /^[A-Za-z0-9][A-Za-z0-9._@-]{0,99}$/, message: '英數字開頭，可含 . _ @ -', trigger: 'blur' },
+  ],
+};
+
+async function loadAccounts() {
+  accountsLoading.value = true;
+  try { accounts.value = await api.get('/accounts'); } catch (e) { ElMessage.error(e.message); } finally { accountsLoading.value = false; }
+}
+
+function openAccount(row) {
+  Object.assign(accDlg, { visible: true, id: row?.Id || null, saving: false, form: row ? { Username: row.Username, DisplayName: row.DisplayName || '', Remark: row.Remark || '', IsActive: row.IsActive } : blankAccount() });
+  nextTick(() => accFormRef.value?.clearValidate());
+}
+
+async function saveAccount() {
+  if (!(await accFormRef.value.validate().catch(() => false))) return;
+  accDlg.saving = true;
+  try {
+    const { Username, ...rest } = accDlg.form;
+    if (accDlg.id) await api.put(`/accounts/${accDlg.id}`, rest);
+    else await api.post('/accounts', { Username, ...rest });
+    ElMessage.success('已儲存');
+    accDlg.visible = false;
+    await loadAccounts();
+  } catch (e) {
+    ElMessage.error(e.message);
+  } finally {
+    accDlg.saving = false;
+  }
+}
+
+async function toggleAccount(row, v) {
+  try {
+    await api.put(`/accounts/${row.Id}`, { IsActive: v });
+    row.IsActive = v;
+    ElMessage.success(v ? `已啟用 ${row.Username}` : `已停用 ${row.Username}，該帳號下一次操作即失去權限`);
+  } catch (e) {
+    ElMessage.error(e.message);
+  }
+}
+
+async function removeAccount(row) {
+  try {
+    await ElMessageBox.confirm(`確定刪除帳號「${row.Username}」？刪除後該帳號立即無法使用本系統。`, '刪除帳號', { type: 'warning', confirmButtonText: '刪除', cancelButtonText: '取消' });
+  } catch { return; }
+  try {
+    await api.delete(`/accounts/${row.Id}`);
+    ElMessage.success('已刪除');
+    await loadAccounts();
+  } catch (e) {
+    ElMessage.error(e.message);
+  }
+}
+
+function onTabChange(name) {
+  if (name === 'audit') loadAudit();
+  if (name === 'accounts') loadAccounts();
+}
 
 // 有規則/憑證在最近一次成功部署之後被修改 → 提示尚未部署
 const pendingChanges = computed(() => {
@@ -352,19 +486,31 @@ onMounted(loadAll);
           <el-switch :model-value="n.IsActive" size="small" @change="(v) => toggleNode(n, v)" />
           <el-button size="small" :icon="Edit" circle text title="編輯節點" @click="openNode(n)" />
         </div>
+        <template v-if="n.IsActive && n.Stats">
+          <div v-if="n.Stats.error" class="res-err">{{ n.Stats.error }}</div>
+          <div v-else class="res" :title="'更新於 ' + fmt(n.Stats.at)">
+            <div v-for="r in resRows(n.Stats)" :key="r.label" class="res-row" :title="r.tip">
+              <span class="res-label">{{ r.label }}</span>
+              <el-progress :percentage="Math.min(100, r.p || 0)" :color="usageColor(r.p || 0)" :stroke-width="8" :show-text="false" class="res-bar" />
+              <span class="res-val">{{ r.text }}</span>
+            </div>
+          </div>
+        </template>
       </el-card>
       <el-button :icon="Refresh" :loading="checking" circle title="重新檢測節點連線" @click="checkNodes" />
       <el-button :icon="Plus" circle title="新增節點" @click="openNode(null)" />
     </section>
 
-    <el-tabs v-model="tab" class="tabs">
+    <el-tabs v-model="tab" class="tabs" @tab-change="onTabChange">
       <!-- ============ 網域規則 ============ -->
       <el-tab-pane label="網域對照規則" name="rules">
         <div class="toolbar">
           <el-button type="primary" :icon="Plus" @click="openRule(null)">新增規則</el-button>
+          <el-input v-model="ruleQuery" :prefix-icon="Search" clearable placeholder="搜尋網域或後端 IP" class="search" />
+          <span v-if="ruleQuery" class="hint">找到 {{ filteredRules.length }} / {{ rules.length }} 筆</span>
           <span class="hint">修改後需按右上角「一鍵同步部署」才會推送到 Nginx 節點。</span>
         </div>
-        <el-table :data="rules" stripe border style="width: 100%" empty-text="尚無規則">
+        <el-table :data="filteredRules" stripe border style="width: 100%" :empty-text="ruleQuery ? '查無符合的規則' : '尚無規則'">
           <el-table-column prop="DomainName" label="來源網域" min-width="200" fixed />
           <el-table-column label="後端目標" min-width="160">
             <template #default="{ row }">{{ row.TargetIp }}:{{ row.TargetPort }}</template>
@@ -484,7 +630,95 @@ onMounted(loadAll);
           </el-table-column>
         </el-table>
       </el-tab-pane>
+
+      <!-- ============ 帳號管理 ============ -->
+      <el-tab-pane label="帳號管理" name="accounts">
+        <div class="toolbar">
+          <el-button type="primary" :icon="Plus" @click="openAccount(null)">新增帳號</el-button>
+          <span class="hint">可登入名單 = 下列啟用中的帳號（含 .env 的 ADMIN_ACCOUNTS）；登入時一律以 SOAP 驗證密碼，本系統不保存密碼。</span>
+        </div>
+        <el-table v-loading="accountsLoading" :data="accounts" stripe border style="width: 100%" empty-text="尚無帳號">
+          <el-table-column prop="Username" label="帳號" min-width="140" />
+          <el-table-column prop="DisplayName" label="姓名 / 單位" min-width="140" />
+          <el-table-column label="來源" width="120" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.Source === 'env'" type="warning">.env 特權</el-tag>
+              <el-tag v-else-if="row.DuplicateOfEnv" type="info" title="此帳號也在 .env 中，以 .env 為準">帳號管理（重複）</el-tag>
+              <el-tag v-else>帳號管理</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="啟用" width="80" align="center">
+            <template #default="{ row }">
+              <el-switch v-if="row.Source === 'db'" :model-value="row.IsActive" @change="(v) => toggleAccount(row, v)" />
+              <el-switch v-else :model-value="true" disabled title="請至 backend/.env 修改" />
+            </template>
+          </el-table-column>
+          <el-table-column label="最後登入" width="170"><template #default="{ row }">{{ fmt(row.LastLoginAt) }}</template></el-table-column>
+          <el-table-column prop="CreatedBy" label="建立者" width="110" />
+          <el-table-column prop="Remark" label="備註" min-width="200" show-overflow-tooltip />
+          <el-table-column label="操作" width="110" fixed="right" align="center">
+            <template #default="{ row }">
+              <template v-if="row.Source === 'db'">
+                <el-button size="small" :icon="Edit" circle title="編輯" @click="openAccount(row)" />
+                <el-button size="small" type="danger" :icon="Delete" circle title="刪除" @click="removeAccount(row)" />
+              </template>
+              <span v-else class="hint">唯讀</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
+      <!-- ============ 操作紀錄 ============ -->
+      <el-tab-pane label="操作紀錄" name="audit">
+        <div class="toolbar">
+          <el-input v-model="audit.q" :prefix-icon="Search" clearable placeholder="帳號、對象（網域 / 別名 / 節點）、IP、內容" class="search wide" @keyup.enter="loadAudit(true)" @clear="loadAudit(true)" />
+          <el-select v-model="audit.action" clearable placeholder="動作" class="sel" @change="loadAudit(true)">
+            <el-option v-for="(v, k) in AUDIT_ACTION" :key="k" :value="k" :label="v.text" />
+          </el-select>
+          <el-select v-model="audit.targetType" clearable placeholder="類別" class="sel" @change="loadAudit(true)">
+            <el-option v-for="(v, k) in AUDIT_TARGET" :key="k" :value="k" :label="v" />
+          </el-select>
+          <el-date-picker v-model="audit.range" type="daterange" range-separator="至" start-placeholder="開始日期" end-placeholder="結束日期" class="range" @change="loadAudit(true)" />
+          <el-button type="primary" :icon="Search" @click="loadAudit(true)">查詢</el-button>
+        </div>
+        <el-table v-loading="audit.loading" :data="audit.rows" stripe border style="width: 100%" empty-text="尚無操作紀錄">
+          <el-table-column label="時間" width="170"><template #default="{ row }">{{ fmt(row.CreatedAt) }}</template></el-table-column>
+          <el-table-column prop="Username" label="帳號" width="110" />
+          <el-table-column prop="ClientIp" label="來源 IP" width="130" />
+          <el-table-column label="動作" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag :type="(AUDIT_ACTION[row.Action] || {}).type" :effect="row.Success ? 'light' : 'dark'">{{ (AUDIT_ACTION[row.Action] || {}).text || row.Action }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="類別" width="100"><template #default="{ row }">{{ AUDIT_TARGET[row.TargetType] || row.TargetType }}</template></el-table-column>
+          <el-table-column prop="TargetName" label="對象" min-width="200" show-overflow-tooltip />
+          <el-table-column label="結果" width="80" align="center">
+            <template #default="{ row }"><el-tag :type="row.Success ? 'success' : 'danger'" size="small">{{ row.Success ? '成功' : '失敗' }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="內容" min-width="280">
+            <template #default="{ row }"><div class="audit-detail">{{ auditDetail(row.Detail) }}</div></template>
+          </el-table-column>
+        </el-table>
+        <el-pagination v-model:current-page="audit.page" v-model:page-size="audit.pageSize" :total="audit.total" :page-sizes="[20, 50, 100, 200]"
+          layout="total, sizes, prev, pager, next" background class="pager" @current-change="loadAudit()" @size-change="loadAudit(true)" />
+      </el-tab-pane>
     </el-tabs>
+
+    <!-- 帳號編輯 -->
+    <el-dialog v-model="accDlg.visible" :title="accDlg.id ? '編輯帳號' : '新增帳號'" width="480px" class="rwd-dialog">
+      <el-form ref="accFormRef" :model="accDlg.form" :rules="accRules" label-width="100px">
+        <el-form-item label="帳號" prop="Username">
+          <el-input v-model="accDlg.form.Username" :disabled="!!accDlg.id" placeholder="與 SOAP 認證相同的帳號" />
+        </el-form-item>
+        <el-form-item label="姓名 / 單位"><el-input v-model="accDlg.form.DisplayName" maxlength="100" /></el-form-item>
+        <el-form-item label="啟用"><el-switch v-model="accDlg.form.IsActive" /></el-form-item>
+        <el-form-item label="備註"><el-input v-model="accDlg.form.Remark" type="textarea" :rows="2" maxlength="300" show-word-limit /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="accDlg.visible = false">取消</el-button>
+        <el-button type="primary" :loading="accDlg.saving" @click="saveAccount">儲存</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 規則編輯 -->
     <el-dialog v-model="ruleDlg.visible" :title="ruleDlg.id ? '編輯網域規則' : '新增網域規則'" width="680px" top="5vh" class="rwd-dialog">
@@ -644,6 +878,11 @@ onMounted(loadAll);
 .node-info { flex: 1; min-width: 0; }
 .node-name { font-weight: 600; }
 .node-meta { color: #7b8794; font-size: 12px; line-height: 1.6; }
+.res { margin-top: 10px; display: grid; gap: 4px; }
+.res-row { display: grid; grid-template-columns: 36px 1fr auto; align-items: center; gap: 8px; font-size: 12px; color: #606266; }
+.res-label { color: #909399; }
+.res-val { font-variant-numeric: tabular-nums; min-width: 92px; text-align: right; }
+.res-err { margin-top: 8px; font-size: 12px; color: #e6a23c; }
 
 .light { width: 14px; height: 14px; border-radius: 50%; flex: none; background: #c0c4cc; }
 .light.green { background: #3fb950; box-shadow: 0 0 0 4px rgba(63, 185, 80, 0.2); animation: pulse 2s infinite; }
@@ -654,6 +893,12 @@ onMounted(loadAll);
 
 .toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
 .hint { color: #909399; font-size: 12px; }
+.search { width: 240px; }
+.search.wide { width: 320px; }
+.sel { width: 130px; }
+.range { max-width: 280px; }
+.pager { margin-top: 12px; justify-content: flex-end; flex-wrap: wrap; }
+.audit-detail { white-space: pre-line; font-size: 12.5px; line-height: 1.5; color: #4a5568; max-height: 9em; overflow: auto; }
 .cert-cell { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
 
@@ -676,6 +921,7 @@ onMounted(loadAll);
   .topbar h1 { font-size: 18px; }
   .node-card { max-width: none; }
   .actions { width: 100%; justify-content: space-between; }
+  .search, .search.wide, .sel, .range { width: 100%; max-width: none; }
 }
 </style>
 

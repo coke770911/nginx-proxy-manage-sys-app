@@ -61,7 +61,30 @@ const DeployLog = sequelize.define('DeployLog', {
   LogText: { type: DataTypes.TEXT },
 }, { tableName: 'DeployLogs', freezeTableName: true, timestamps: false });
 
+const AuditLog = sequelize.define('AuditLog', {
+  Id: pk(DataTypes.BIGINT),
+  CreatedAt: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
+  Username: { type: DataTypes.STRING(100), allowNull: false },
+  ClientIp: { type: DataTypes.STRING(64) },
+  Action: { type: DataTypes.STRING(20), allowNull: false },
+  TargetType: { type: DataTypes.STRING(20), allowNull: false },
+  TargetId: { type: DataTypes.STRING(50) },
+  TargetName: { type: DataTypes.STRING(300) },
+  Success: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+  Detail: { type: DataTypes.TEXT },
+}, { tableName: 'AuditLogs', freezeTableName: true, timestamps: false });
+
+const AdminAccount = sequelize.define('AdminAccount', {
+  Id: pk(),
+  Username: { type: DataTypes.STRING(100), allowNull: false, unique: true },
+  DisplayName: { type: DataTypes.STRING(100) },
+  IsActive: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+  Remark: { type: DataTypes.STRING(300) },
+  CreatedBy: { type: DataTypes.STRING(100) },
+  LastLoginAt: { type: DataTypes.DATE },
+}, { tableName: 'AdminAccounts', ...stamps });
+
 DomainRule.belongsTo(SslCertificate, { foreignKey: 'CertificateId', as: 'certificate' });
 SslCertificate.hasMany(DomainRule, { foreignKey: 'CertificateId', as: 'rules' });
 
-module.exports = { sequelize, ProxyNode, SslCertificate, DomainRule, DeployLog };
+module.exports = { sequelize, ProxyNode, SslCertificate, DomainRule, DeployLog, AuditLog, AdminAccount };
