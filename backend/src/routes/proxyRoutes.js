@@ -6,10 +6,11 @@ const { Op } = require('sequelize');
 const { sequelize, ProxyNode, SslCertificate, DomainRule, RuleUpstream, DeployLog, AuditLog } = require('../models');
 const audit = require('../services/auditService');
 const certService = require('../services/certService');
-const { validateRule, renderConf } = require('../services/nginxTemplate');
+const { validateRule, renderConf, upstreamsOf } = require('../services/nginxTemplate');
 const deployService = require('../services/deployService');
 const healthService = require('../services/healthService');
 const { fetchHostFingerprint } = require('../services/sshSession');
+const backendProbe = require('../services/backendProbe');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 3 } });
@@ -280,6 +281,32 @@ router.delete('/rules/:id', wrap(async (req, res) => {
   await rule.destroy(); // RuleUpstreams 由外鍵 ON DELETE CASCADE 一併刪除
   await audit.record(req, { action: 'DELETE', targetType: 'RULE', targetId: rule.Id, targetName: rule.DomainName, detail: { ...audit.snapshot(plain, RULE_FIELDS), Upstreams: upText(plain.Upstreams) } });
   res.json({ ok: true });
+}));
+
+/**
+ * 從每台啟用中的節點測試後端連線
+ * POST /rules/test-backends  body: { Upstreams: [{ Host, Port }] }（表單尚未儲存時使用）
+ * POST /rules/:id/test-backends（測試已儲存規則中啟用的後端）
+ */
+async function testBackends(targets) {
+  const nodes = await ProxyNode.findAll({ where: { IsActive: true }, order: [['Id', 'ASC']] });
+  if (!nodes.length) throw new HttpError(400, '沒有啟用中的 Nginx 節點可以測試');
+  let clean;
+  try { clean = backendProbe.cleanTargets(targets); } catch (e) { throw new HttpError(400, e.message); }
+  if (!clean.length) throw new HttpError(400, '沒有可測試的後端（請確認 IP / Port 格式）');
+  return { targets: clean, nodes: await backendProbe.probeFromNodes(nodes, clean) };
+}
+
+router.post('/rules/test-backends', wrap(async (req, res) => {
+  const ups = Array.isArray(req.body?.Upstreams) ? req.body.Upstreams : [];
+  res.json(await testBackends(ups.filter((u) => u && u.IsActive !== false)));
+}));
+
+router.post('/rules/:id/test-backends', wrap(async (req, res) => {
+  const rule = await loadRule(req.params.id);
+  if (!rule) throw new HttpError(404, '規則不存在');
+  const plain = rule.get({ plain: true });
+  res.json({ domain: plain.DomainName, ...(await testBackends(upstreamsOf(plain).filter((u) => u.IsActive !== false))) });
 }));
 
 /** 預覽該規則將生成的 Nginx 設定檔 */

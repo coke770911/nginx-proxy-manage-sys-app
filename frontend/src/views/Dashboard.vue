@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search } from '@element-plus/icons-vue';
+import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection } from '@element-plus/icons-vue';
 import api, { eventsUrl, session, logout } from '../api';
 
 /* ------------------------------------------------------------------ 資料 */
@@ -341,6 +341,29 @@ async function quickToggle(row, field, v) {
   } catch (e) { ElMessage.error(e.message); }
 }
 
+/* ------------------------------------------------------------------ 從節點測試後端連線 */
+const probeDlg = reactive({ visible: false, loading: false, title: '', targets: [], nodes: [], error: '' });
+const PROBE_TAG = { OK: 'success', TIMEOUT: 'danger', REFUSED: 'danger', ERROR: 'info' };
+const PROBE_TEXT = { OK: '可連線', TIMEOUT: '逾時', REFUSED: '拒絕連線', ERROR: '無結果' };
+const probeCell = (node, t) => node.results.find((x) => x.host === t.host && x.port === t.port);
+const probeAllOk = computed(() => probeDlg.nodes.length > 0 && probeDlg.nodes.every((n) => !n.error && n.results.every((x) => x.ok)));
+
+async function runProbe(title, request) {
+  Object.assign(probeDlg, { visible: true, loading: true, title, targets: [], nodes: [], error: '' });
+  try {
+    const data = await request();
+    probeDlg.targets = data.targets;
+    probeDlg.nodes = data.nodes;
+  } catch (e) {
+    probeDlg.error = e.message;
+  } finally {
+    probeDlg.loading = false;
+  }
+}
+const probeRule = (row) => runProbe(`測試後端連線：${row.DomainName}`, () => api.post(`/rules/${row.Id}/test-backends`));
+const probeForm = () => runProbe(`測試後端連線：${ruleDlg.form.DomainName || '（未儲存的規則）'}`,
+  () => api.post('/rules/test-backends', { Upstreams: ruleDlg.form.Upstreams.map((u) => ({ ...u, Host: String(u.Host || '').trim() })) }));
+
 async function removeRule(row) {
   try {
     await ElMessageBox.confirm(`確定刪除規則「${row.DomainName}」？`, '刪除確認', { type: 'warning' });
@@ -570,8 +593,9 @@ onMounted(loadAll);
             <template #default="{ row }"><el-switch :model-value="row.IsMaintenance" size="small" active-color="#e6a23c" @change="(v) => quickToggle(row, 'IsMaintenance', v)" /></template>
           </el-table-column>
           <el-table-column prop="Remark" label="備註" min-width="160" show-overflow-tooltip />
-          <el-table-column label="操作" width="190" fixed="right" align="center">
+          <el-table-column label="操作" width="220" fixed="right" align="center">
             <template #default="{ row }">
+              <el-button size="small" :icon="Connection" circle title="從節點測試後端連線" @click="probeRule(row)" />
               <el-button size="small" :icon="View" circle title="預覽 Nginx 設定" @click="previewRule(row)" />
               <el-button size="small" :icon="Edit" circle title="編輯" @click="openRule(row)" />
               <el-button size="small" type="danger" :icon="Delete" circle title="刪除" @click="removeRule(row)" />
@@ -737,6 +761,33 @@ onMounted(loadAll);
       </el-tab-pane>
     </el-tabs>
 
+    <!-- 後端連線測試結果 -->
+    <el-dialog v-model="probeDlg.visible" :title="probeDlg.title" width="720px" class="rwd-dialog" append-to-body>
+      <div v-loading="probeDlg.loading" element-loading-text="從各節點測試中（每個後端最多 5 秒）…" class="probe-body">
+        <el-alert v-if="probeDlg.error" type="error" :closable="false" show-icon :title="probeDlg.error" />
+        <template v-else-if="!probeDlg.loading">
+          <el-alert v-if="probeAllOk" type="success" :closable="false" show-icon title="所有節點都能連到所有後端" />
+          <el-alert v-else type="warning" :closable="false" show-icon title="有後端連不上：使用者連線時會得到 502 / 504，請確認後端服務已啟動、防火牆已對兩台節點開放該 Port" />
+          <el-alert v-for="n in probeDlg.nodes.filter((x) => x.error)" :key="'e' + n.nodeId" type="error" :closable="false" show-icon :title="`${n.nodeName}：${n.error}`" class="probe-err" />
+          <el-table :data="probeDlg.targets" border style="width: 100%; margin-top: 12px">
+            <el-table-column label="後端" min-width="170"><template #default="{ row }">{{ row.host }}:{{ row.port }}</template></el-table-column>
+            <el-table-column v-for="n in probeDlg.nodes" :key="n.nodeId" :label="`${n.nodeName}（${n.ip}）`" min-width="200">
+              <template #default="{ row }">
+                <template v-if="probeCell(n, row)">
+                  <el-tag :type="PROBE_TAG[probeCell(n, row).status]" :title="probeCell(n, row).message">{{ PROBE_TEXT[probeCell(n, row).status] }}</el-tag>
+                  <span v-if="probeCell(n, row).ok" class="probe-meta">{{ probeCell(n, row).ms }} ms<template v-if="probeCell(n, row).http"> · HTTP {{ probeCell(n, row).http }}</template></span>
+                  <div v-else class="probe-meta">{{ probeCell(n, row).message }}</div>
+                </template>
+                <span v-else class="hint">—</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="form-hint">在每台啟用中的節點上測試 TCP 連線，連得上再以 HTTP 取狀態碼（僅供參考，後端只提供 HTTPS 時可能顯示 400）。部署時也會自動檢查並在即時 Log 提出警告。</div>
+        </template>
+      </div>
+      <template #footer><el-button @click="probeDlg.visible = false">關閉</el-button></template>
+    </el-dialog>
+
     <!-- 帳號編輯 -->
     <el-dialog v-model="accDlg.visible" :title="accDlg.id ? '編輯帳號' : '新增帳號'" width="480px" class="rwd-dialog">
       <el-form ref="accFormRef" :model="accDlg.form" :rules="accRules" label-width="100px">
@@ -768,7 +819,10 @@ onMounted(loadAll);
               <el-switch v-model="u.IsActive" size="small" title="停用 = 暫時下線維護" />
               <el-button :icon="Delete" circle text size="small" :disabled="ruleDlg.form.Upstreams.length <= 1" title="移除" @click="ruleDlg.form.Upstreams.splice(i, 1)" />
             </div>
-            <el-button :icon="Plus" size="small" @click="ruleDlg.form.Upstreams.push(blankUpstream())">新增後端主機</el-button>
+            <div class="ups-actions">
+              <el-button :icon="Plus" size="small" @click="ruleDlg.form.Upstreams.push(blankUpstream())">新增後端主機</el-button>
+              <el-button :icon="Connection" size="small" @click="probeForm">從節點測試連線</el-button>
+            </div>
           </div>
         </el-form-item>
         <el-form-item v-if="ruleDlg.form.Upstreams.length > 1 || ruleDlg.form.LbMethod !== 'round_robin'" label="分配方式">
@@ -959,6 +1013,11 @@ onMounted(loadAll);
 .ups-head { font-size: 12px; color: #909399; line-height: 1.4; }
 .ups-row .el-input-number { width: 100%; }
 .ups-edit > .el-button { justify-self: start; }
+.ups-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.probe-body { min-height: 120px; }
+.probe-meta { margin-left: 8px; font-size: 12px; color: #909399; line-height: 1.5; }
+div.probe-meta { margin: 4px 0 0; }
+.probe-err { margin-top: 8px; }
 .audit-detail { white-space: pre-line; font-size: 12.5px; line-height: 1.5; color: #4a5568; max-height: 9em; overflow: auto; }
 .cert-cell { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }

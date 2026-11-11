@@ -80,14 +80,106 @@ const indent = (text, n = 4) =>
     .map((l) => (l.trim() ? ' '.repeat(n) + l.trimEnd() : ''))
     .join('\n');
 
-const maintenanceHtml = (domain) =>
-  '<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8">' +
-  '<meta name="viewport" content="width=device-width,initial-scale=1"><title>系統維護中</title>' +
-  '<style>body{font-family:sans-serif;background:#f5f7fa;color:#333;display:flex;align-items:center;' +
-  'justify-content:center;min-height:100vh;margin:0}main{text-align:center;padding:2rem}' +
-  'h1{font-size:1.8rem}p{color:#666}</style></head><body><main><h1>系統維護中</h1>' +
-  `<p>${domain} 目前進行維護作業，請稍後再試。</p>` +
-  '<p>System under maintenance. Please try again later.</p></main></body></html>';
+/**
+ * 維護中頁面：原創「戴安全帽的土撥鼠挖地板」SVG 插圖 + CSS 動畫，全部內嵌，不需額外圖檔。
+ * 此 HTML 會放進 nginx 的 return 503 '...' 單引號字串，內容不可出現單引號、$（nginx 變數）、反斜線與換行，
+ * renderConf() 會再檢查一次。
+ */
+const MAINT_SVG = [
+  '<svg class="art" viewBox="0 0 320 230" role="img" aria-label="戴著安全帽的土撥鼠正在挖地板">',
+  // 木地板
+  '<rect x="0" y="150" width="320" height="80" fill="#dcaa70"/>',
+  '<path d="M0 174H320M0 198H320M0 222H320" stroke="#b9854c" stroke-width="2"/>',
+  '<path d="M48 150V174M262 150V174M20 174V198M296 174V198M84 198V222M236 198V222M150 198V222" stroke="#b9854c" stroke-width="2"/>',
+  // 洞（後方）
+  '<ellipse cx="160" cy="170" rx="74" ry="21" fill="#2b1d14"/>',
+  // 三角錐
+  '<path d="M276 150l11-38l11 38z" fill="#f07c3e"/><path d="M280 137h14M283 125h8" stroke="#fff" stroke-width="4"/>',
+  '<rect x="268" y="148" width="38" height="6" rx="3" fill="#d4622a"/>',
+  // 土撥鼠（身體、臉、安全帽）
+  '<g class="gh">',
+  '<circle cx="125" cy="88" r="11" fill="#7d5434"/><circle cx="195" cy="88" r="11" fill="#7d5434"/>',
+  '<circle cx="125" cy="89" r="5" fill="#c99a78"/><circle cx="195" cy="89" r="5" fill="#c99a78"/>',
+  '<path d="M106 188C102 124 120 80 160 80C200 80 218 124 214 188Z" fill="#9a6b43"/>',
+  '<path d="M132 188C132 146 144 128 160 128C176 128 188 146 188 188Z" fill="#e3c39b"/>',
+  '<ellipse cx="160" cy="117" rx="23" ry="17" fill="#ecd5b6"/>',
+  '<circle cx="142" cy="101" r="5.5" fill="#2a1d14"/><circle cx="178" cy="101" r="5.5" fill="#2a1d14"/>',
+  '<circle cx="144" cy="99" r="1.8" fill="#fff"/><circle cx="180" cy="99" r="1.8" fill="#fff"/>',
+  '<ellipse cx="131" cy="115" rx="6.5" ry="3.8" fill="#ec9c8a" opacity=".55"/><ellipse cx="189" cy="115" rx="6.5" ry="3.8" fill="#ec9c8a" opacity=".55"/>',
+  '<ellipse cx="160" cy="110" rx="6.5" ry="4.5" fill="#3b2a1e"/>',
+  '<path d="M153 117q7 6 14 0" stroke="#3b2a1e" stroke-width="2" fill="none" stroke-linecap="round"/>',
+  '<rect x="155.5" y="119" width="9" height="9" rx="2" fill="#fff" stroke="#d8c7b0"/><path d="M160 119v9" stroke="#d8c7b0"/>',
+  '<path d="M121 88C121 58 199 58 199 88Z" fill="#f5b82e"/><path d="M160 63v23" stroke="#e09b12" stroke-width="6" stroke-linecap="round"/>',
+  '<rect x="112" y="84" width="96" height="10" rx="5" fill="#e09b12"/>',
+  '</g>',
+  // 洞口土堆與翹起的木板（前方，遮住身體下半）
+  '<path d="M84 170Q160 198 236 170Q242 186 228 191Q160 210 92 191Q78 186 84 170Z" fill="#6b4a2f"/>',
+  '<path d="M66 160l26-13l6 10l-26 13z" fill="#e6b47c" stroke="#b9854c" stroke-width="2"/>',
+  '<path d="M226 152l28 5l-2 11l-28-5z" fill="#e6b47c" stroke="#b9854c" stroke-width="2"/>',
+  // 雙手與鏟子
+  '<g class="gh">',
+  '<path d="M200 166L238 116" stroke="#8a5a2b" stroke-width="5" stroke-linecap="round"/>',
+  '<path d="M236 104l14 4l-4 16l-14-4z" fill="#a9bccb" stroke="#7f95a6" stroke-width="2"/>',
+  '<circle cx="243" cy="104" r="4" fill="#7a5536"/><circle cx="249" cy="108" r="3" fill="#7a5536"/>',
+  '<ellipse cx="121" cy="166" rx="15" ry="9.5" fill="#7d5434"/>',
+  '<path d="M111 170v5M117 171v5M123 171v5M129 170v5" stroke="#f3e6d3" stroke-width="2.5" stroke-linecap="round"/>',
+  '<ellipse cx="200" cy="166" rx="15" ry="9.5" fill="#7d5434"/>',
+  '<path d="M190 170v5M196 171v5M202 171v5M208 170v5" stroke="#f3e6d3" stroke-width="2.5" stroke-linecap="round"/>',
+  '</g>',
+  // 飛濺的泥土
+  '<circle class="dirt l d1" cx="104" cy="150" r="5" fill="#7a5536"/>',
+  '<circle class="dirt r d2" cx="218" cy="150" r="4.5" fill="#7a5536"/>',
+  '<circle class="dirt l d3" cx="96" cy="140" r="3.5" fill="#8d6441"/>',
+  '<circle class="dirt r d4" cx="226" cy="138" r="3.5" fill="#8d6441"/>',
+  '<rect class="dirt l d2" x="110" y="146" width="7" height="4" rx="1" fill="#e6b47c"/>',
+  '<rect class="dirt r d1" x="206" y="144" width="7" height="4" rx="1" fill="#e6b47c"/>',
+  '</svg>',
+].join('');
+
+const MAINT_CSS = [
+  ':root{color-scheme:light dark}',
+  '*{box-sizing:border-box}',
+  'body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;',
+  'font-family:system-ui,-apple-system,"Segoe UI","Microsoft JhengHei","PingFang TC","Noto Sans TC",sans-serif;',
+  'background:#f6efe4;color:#3b2a1e}',
+  'main{width:100%;max-width:520px;text-align:center;background:#fffaf2;border-radius:20px;padding:28px 24px 32px;',
+  'box-shadow:0 10px 30px rgba(107,74,47,.15)}',
+  '.art{width:100%;max-width:360px;height:auto;display:block;margin:0 auto 8px}',
+  'h1{font-size:1.7rem;margin:8px 0 6px;letter-spacing:.06em}',
+  '.sub{margin:0 0 18px;color:#8a6a4f}',
+  '.domain{display:inline-block;font-family:ui-monospace,Consolas,monospace;background:#f3e3cc;color:#6b4a2f;',
+  'padding:4px 12px;border-radius:999px;font-size:.9rem;margin-bottom:14px;word-break:break-all}',
+  'p{line-height:1.7;margin:4px 0}.en{color:#9b8571;font-size:.9rem}',
+  '.gh{animation:bob 1.6s ease-in-out infinite}',
+  '@keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}',
+  '.dirt{opacity:0;transform-box:fill-box;transform-origin:center;animation:1.6s ease-out infinite}',
+  '.l{animation-name:flyL}.r{animation-name:flyR}',
+  '.d2{animation-delay:.4s}.d3{animation-delay:.8s}.d4{animation-delay:1.2s}',
+  '@keyframes flyL{0%{opacity:0;transform:translate(14px,14px) scale(.5)}25%{opacity:1}100%{opacity:0;transform:translate(-26px,-34px) scale(1)}}',
+  '@keyframes flyR{0%{opacity:0;transform:translate(-14px,14px) scale(.5)}25%{opacity:1}100%{opacity:0;transform:translate(26px,-34px) scale(1)}}',
+  '@media (prefers-reduced-motion:reduce){.gh,.dirt{animation:none}.dirt{opacity:1}}',
+  '@media (prefers-color-scheme:dark){body{background:#1f1813;color:#f1e4d3}main{background:#2a211a;box-shadow:none}',
+  '.sub{color:#cdb398}.domain{background:#3a2d22;color:#f1d7b5}.en{color:#a8927c}}',
+].join('');
+
+const maintenanceHtml = (domain) => [
+  '<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8">',
+  '<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">',
+  `<title>系統維護中 - ${domain}</title><style>${MAINT_CSS}</style></head><body><main>`,
+  MAINT_SVG,
+  '<h1>系統維護中</h1>',
+  '<p class="sub">土撥鼠工程隊正在努力施工，馬上就好！</p>',
+  `<div class="domain">${domain}</div>`,
+  '<p>目前進行系統維護作業，造成不便敬請見諒，請稍後再試。</p>',
+  '<p class="en">This site is under maintenance. Please try again later.</p>',
+  '</main></body></html>',
+].join('');
+
+/** 放進 nginx 單引號字串前的最後防線：不可含 ' $ \ 或換行 */
+function safeNginxString(s) {
+  if (/['$\\\r\n]/.test(s)) throw new Error('維護頁面 HTML 含有 nginx 字串不允許的字元（單引號、$、反斜線或換行）');
+  return s;
+}
 
 function renderConf(rule) {
   const errs = validateRule(rule);
@@ -145,7 +237,7 @@ function renderConf(rule) {
     '    charset utf-8;',
     '    add_header Retry-After 3600 always;',
     '    add_header Cache-Control "no-store" always;',
-    `    return 503 '${maintenanceHtml(domain)}';`,
+    `    return 503 '${safeNginxString(maintenanceHtml(domain))}';`,
     '}',
   ].join('\n');
 
