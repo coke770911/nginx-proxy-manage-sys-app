@@ -7,6 +7,7 @@ const certService = require('../services/certService');
 const { validateRule, renderConf } = require('../services/nginxTemplate');
 const deployService = require('../services/deployService');
 const healthService = require('../services/healthService');
+const { fetchHostFingerprint } = require('../services/sshSession');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 3 } });
@@ -29,8 +30,24 @@ const NO_PEM = { exclude: ['CertPem', 'KeyPem'] };
 const NODE_FIELDS = ['NodeName', 'IpAddress', 'SshPort', 'SshUser', 'SshKeyPath', 'HostKeySha256', 'IsActive'];
 const HOST_RE = /^[A-Za-z0-9]([A-Za-z0-9.-]{0,253}[A-Za-z0-9])?$/;
 
+const FP_RE = /^SHA256:[A-Za-z0-9+/]{43}=?$/;
+
+/** 清理節點欄位：去空白、空字串轉 null */
+function cleanNode(data) {
+  for (const k of ['NodeName', 'IpAddress', 'SshUser', 'SshKeyPath', 'HostKeySha256']) {
+    if (typeof data[k] === 'string') data[k] = data[k].trim();
+  }
+  if (data.SshKeyPath === '') data.SshKeyPath = null;
+  if (data.HostKeySha256 === '') data.HostKeySha256 = null;
+  if (data.SshPort !== undefined) data.SshPort = Number(data.SshPort);
+  return data;
+}
+
 function checkNode(n) {
   if (!n.NodeName) throw new HttpError(400, '節點名稱必填');
+  if (n.NodeName.length > 100) throw new HttpError(400, '節點名稱最多 100 字');
+  if (n.SshKeyPath && (n.SshKeyPath.length > 260 || /[\0\r\n]/.test(n.SshKeyPath))) throw new HttpError(400, '私鑰路徑格式不正確');
+  if (n.HostKeySha256 && !FP_RE.test(n.HostKeySha256)) throw new HttpError(400, '主機金鑰指紋格式應為 SHA256:xxxx（43 字元 Base64）');
   if (!HOST_RE.test(n.IpAddress || '')) throw new HttpError(400, '節點 IP/主機名稱格式不正確');
   const port = Number(n.SshPort);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HttpError(400, 'SSH Port 必須為 1–65535');
@@ -45,8 +62,21 @@ router.post('/nodes/check', wrap(async (req, res) => {
   res.json(await healthService.checkAllNodes());
 }));
 
+router.post('/nodes/fingerprint', wrap(async (req, res) => {
+  const host = String(req.body?.IpAddress || '').trim();
+  const port = Number(req.body?.SshPort || 22);
+  if (!HOST_RE.test(host)) throw new HttpError(400, '節點 IP/主機名稱格式不正確');
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new HttpError(400, 'SSH Port 必須為 1–65535');
+  try {
+    res.json({ fingerprint: await fetchHostFingerprint(host, port) });
+  } catch (e) {
+    throw new HttpError(502, `無法讀取 ${host}:${port} 的主機金鑰：${e.message}`);
+  }
+}));
+
 router.post('/nodes', wrap(async (req, res) => {
-  const data = pick(req.body, NODE_FIELDS);
+  const data = cleanNode(pick(req.body, NODE_FIELDS));
+  if ('IsActive' in data) data.IsActive = toBool(data.IsActive);
   checkNode({ SshPort: 22, SshUser: 'deployer', ...data });
   res.status(201).json(await ProxyNode.create(data));
 }));
@@ -54,7 +84,7 @@ router.post('/nodes', wrap(async (req, res) => {
 router.put('/nodes/:id', wrap(async (req, res) => {
   const node = await ProxyNode.findByPk(req.params.id);
   if (!node) throw new HttpError(404, '節點不存在');
-  const data = pick(req.body, NODE_FIELDS);
+  const data = cleanNode(pick(req.body, NODE_FIELDS));
   if ('IsActive' in data) data.IsActive = toBool(data.IsActive);
   checkNode({ ...node.get({ plain: true }), ...data });
   res.json(await node.update(data));
@@ -219,7 +249,7 @@ router.get('/deploy/events', (req, res) => {
 
 router.post('/deploy', wrap(async (req, res) => {
   const result = await deployService.deploy({
-    triggeredBy: String(req.get('x-operator') || 'admin').slice(0, 100),
+    triggeredBy: String(req.user?.username || 'unknown').slice(0, 100),
     triggerIp: req.ip,
   });
   // 失敗（含 nginx -t 失敗已回滾）回 422，body 內含 errorDetail（nginx -t 原始 stderr）供前端顯示

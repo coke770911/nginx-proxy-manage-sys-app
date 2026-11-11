@@ -22,3 +22,6 @@ keys/
 Thumbs.db
 .vscode/
 .idea/
+
+# 前端編譯產物（由 frontend npm run build 產生）
+backend/public/

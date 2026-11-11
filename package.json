@@ -3,6 +3,9 @@
   "private": true,
   "description": "校園網域反向代理與 SSL 憑證集中管理系統",
   "scripts": {
+    "install:all": "npm --prefix backend install && npm --prefix frontend install",
+    "build": "npm --prefix frontend run build",
+    "start": "npm --prefix backend start",
     "setup-hooks": "git config core.hooksPath .githooks",
     "version:next": "node scripts/version.js",
     "version:test": "node scripts/version.js --test",

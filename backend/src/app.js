@@ -1,41 +1,40 @@
 'use strict';
 const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
 const express = require('express');
-const cors = require('cors');
 const config = require('./config');
 const { sequelize } = require('./models');
 const proxyRoutes = require('./routes/proxyRoutes');
+const auth = require('./routes/authRoutes');
 const healthService = require('./services/healthService');
 
 const app = express();
 app.disable('x-powered-by');
-app.set('trust proxy', true);
-app.use(cors());
+// 預設只信任本機反向代理的 X-Forwarded-For，避免偽造來源 IP 繞過登入鎖定
+app.set('trust proxy', config.trustProxy);
 app.use(express.json({ limit: '1mb' }));
 
-/** 簡易 API Token 驗證（設定 API_TOKEN 後啟用）；SSE 因 EventSource 無法帶標頭，可用 ?token= */
-function authGuard(req, res, next) {
-  if (!config.apiToken) return next();
-  const given = String(req.get('x-api-token') || req.query.token || '');
-  const a = Buffer.from(given);
-  const b = Buffer.from(config.apiToken);
-  if (a.length === b.length && crypto.timingSafeEqual(a, b)) return next();
-  return res.status(401).json({ message: '未授權：缺少或錯誤的 API Token' });
-}
-
 app.get('/healthz', (req, res) => res.json({ ok: true }));
-app.use('/api', authGuard, proxyRoutes);
+app.use('/api/auth', auth.router);
+app.use('/api', auth.requireAuth, proxyRoutes);
+app.use('/api', (req, res) => res.status(404).json({ message: '找不到此 API' }));
 
-// 正式環境：直接由 Express 提供前端 build 結果
-const dist = path.resolve(__dirname, '../../frontend/dist');
-if (fs.existsSync(dist)) {
-  app.use(express.static(dist));
-  app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(dist, 'index.html')));
+// 前端 build 結果（frontend 執行 npm run build 會輸出到 backend/public），與 API 共用同一個 port
+const publicDir = path.resolve(__dirname, '../public');
+if (fs.existsSync(path.join(publicDir, 'index.html'))) {
+  app.use(express.static(publicDir));
+  app.get(/^\/(?!api(\/|$)).*/, (req, res) => res.sendFile(path.join(publicDir, 'index.html')));
+} else {
+  console.warn('[web] 找不到 backend/public/index.html，請先在 frontend 執行 npm run build');
 }
 
 (async () => {
+  if (!config.auth.jwtSecret || config.auth.jwtSecret.length < 32) {
+    console.error('[auth] JWT_SECRET 未設定或長度不足 32 字元，請於 backend/.env 設定');
+    process.exit(1);
+  }
+  if (!config.auth.adminAccounts.length) console.warn('[auth] ADMIN_ACCOUNTS 未設定，目前沒有任何帳號可以登入');
+  if (!config.soap.url) console.warn('[auth] SOAP_URL 未設定，登入驗證將無法使用');
   try {
     await sequelize.authenticate();
     console.log('[db] SQL Server 連線成功');

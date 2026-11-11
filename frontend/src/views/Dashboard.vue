@@ -1,8 +1,8 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled } from '@element-plus/icons-vue';
-import api, { eventsUrl } from '../api';
+import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton } from '@element-plus/icons-vue';
+import api, { eventsUrl, session, logout } from '../api';
 
 /* ------------------------------------------------------------------ 資料 */
 const nodes = ref([]);
@@ -72,6 +72,74 @@ async function toggleNode(n, v) {
   try {
     await api.put(`/nodes/${n.Id}`, { IsActive: v });
     n.IsActive = v;
+  } catch (e) { ElMessage.error(e.message); }
+}
+
+/* ------------------------------------------------------------------ 節點 CRUD */
+const blankNode = () => ({
+  NodeName: '', IpAddress: '', SshPort: 22, SshUser: 'deployer', SshKeyPath: '', HostKeySha256: '', IsActive: true,
+});
+const pickNode = (n) => Object.fromEntries(Object.keys(blankNode()).map((k) => [k, n[k] ?? blankNode()[k]]));
+const nodeDlg = reactive({ visible: false, id: null, saving: false, probing: false, form: blankNode() });
+const nodeFormRef = ref();
+const HOST_RE = /^[A-Za-z0-9]([A-Za-z0-9.-]{0,253}[A-Za-z0-9])?$/;
+const nodeRules = {
+  NodeName: [{ required: true, message: '請輸入節點名稱', trigger: 'blur' }],
+  IpAddress: [
+    { required: true, message: '請輸入 IP 或主機名稱', trigger: 'blur' },
+    { pattern: HOST_RE, message: 'IP / 主機名稱格式不正確', trigger: 'blur' },
+  ],
+  SshUser: [
+    { required: true, message: '請輸入 SSH 帳號', trigger: 'blur' },
+    { pattern: /^[a-z_][a-z0-9_-]{0,31}$/i, message: 'SSH 帳號格式不正確', trigger: 'blur' },
+  ],
+  HostKeySha256: [{ pattern: /^(SHA256:[A-Za-z0-9+/]{43}=?)?$/, message: '格式應為 SHA256:xxxx', trigger: 'blur' }],
+};
+
+function openNode(row) {
+  nodeDlg.id = row ? row.Id : null;
+  nodeDlg.form = row ? pickNode(row) : blankNode();
+  nodeDlg.visible = true;
+  nextTick(() => nodeFormRef.value?.clearValidate());
+}
+
+async function probeFingerprint() {
+  const { IpAddress, SshPort } = nodeDlg.form;
+  if (!HOST_RE.test(IpAddress || '')) return ElMessage.warning('請先輸入正確的 IP');
+  nodeDlg.probing = true;
+  try {
+    const res = await api.post('/nodes/fingerprint', { IpAddress, SshPort });
+    const old = nodeDlg.form.HostKeySha256;
+    nodeDlg.form.HostKeySha256 = res.fingerprint;
+    if (old && old !== res.fingerprint) ElMessage.warning('讀到的指紋與原本設定不同，請確認主機是否重灌或遭冒充');
+    else ElMessage.success('已讀取主機金鑰指紋，請與主機上 ssh-keygen 的結果核對');
+  } catch (e) { ElMessage.error(e.message); } finally { nodeDlg.probing = false; }
+  return undefined;
+}
+
+async function saveNode() {
+  await nodeFormRef.value.validate();
+  nodeDlg.saving = true;
+  try {
+    if (nodeDlg.id) await api.put(`/nodes/${nodeDlg.id}`, nodeDlg.form);
+    else await api.post('/nodes', nodeDlg.form);
+    ElMessage.success('節點已儲存，可按重新檢測確認連線');
+    nodeDlg.visible = false;
+    await loadAll();
+  } catch (e) { ElMessage.error(e.message); } finally { nodeDlg.saving = false; }
+}
+
+async function removeNode(row) {
+  try {
+    await ElMessageBox.confirm(
+      `確定刪除節點「${row.NodeName}（${row.IpAddress}）」？刪除後部署不再推送到這台主機，但不會清除主機上已部署的設定。`,
+      '刪除確認', { type: 'warning' },
+    );
+  } catch { return; }
+  try {
+    await api.delete(`/nodes/${row.Id}`);
+    ElMessage.success('已刪除');
+    await loadAll();
   } catch (e) { ElMessage.error(e.message); }
 }
 
@@ -266,6 +334,8 @@ onMounted(loadAll);
         <el-button type="primary" size="large" :icon="Upload" :loading="deploying" @click="startDeploy">
           一鍵同步部署
         </el-button>
+        <span class="user">{{ session.username }}</span>
+        <el-button :icon="SwitchButton" circle title="登出" @click="logout" />
       </div>
     </header>
 
@@ -280,9 +350,11 @@ onMounted(loadAll);
             <div class="node-meta">最後同步：{{ fmt(n.LastSyncAt) }}</div>
           </div>
           <el-switch :model-value="n.IsActive" size="small" @change="(v) => toggleNode(n, v)" />
+          <el-button size="small" :icon="Edit" circle text title="編輯節點" @click="openNode(n)" />
         </div>
       </el-card>
       <el-button :icon="Refresh" :loading="checking" circle title="重新檢測節點連線" @click="checkNodes" />
+      <el-button :icon="Plus" circle title="新增節點" @click="openNode(null)" />
     </section>
 
     <el-tabs v-model="tab" class="tabs">
@@ -357,6 +429,45 @@ onMounted(loadAll);
         </el-table>
       </el-tab-pane>
 
+      <!-- ============ Nginx 節點 ============ -->
+      <el-tab-pane label="Nginx 節點" name="nodes">
+        <div class="toolbar">
+          <el-button type="primary" :icon="Plus" @click="openNode(null)">新增節點</el-button>
+          <span class="hint">部署會推送到所有「啟用」的節點；修改 IP 後建議按上方重新檢測確認連線。</span>
+        </div>
+        <el-table :data="nodes" stripe border style="width: 100%" empty-text="尚無節點">
+          <el-table-column prop="NodeName" label="節點名稱" min-width="150" fixed />
+          <el-table-column label="IP / Port" min-width="170">
+            <template #default="{ row }">{{ row.IpAddress }}:{{ row.SshPort }}</template>
+          </el-table-column>
+          <el-table-column prop="SshUser" label="SSH 帳號" width="110" />
+          <el-table-column label="私鑰路徑" min-width="200" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.SshKeyPath || '（使用 .env 預設）' }}</template>
+          </el-table-column>
+          <el-table-column label="主機指紋" width="110" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.HostKeySha256" size="small" type="success" :title="row.HostKeySha256">已設定</el-tag>
+              <el-tag v-else size="small" type="warning">未驗證</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="狀態" min-width="170">
+            <template #default="{ row }">
+              <span class="light sm" :class="lightClass(row)" />
+              {{ row.IsActive ? HEALTH_TEXT[row.HealthStatus] : '已停用' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="啟用" width="80" align="center">
+            <template #default="{ row }"><el-switch :model-value="row.IsActive" size="small" @change="(v) => toggleNode(row, v)" /></template>
+          </el-table-column>
+          <el-table-column label="操作" width="110" fixed="right" align="center">
+            <template #default="{ row }">
+              <el-button size="small" :icon="Edit" circle title="編輯" @click="openNode(row)" />
+              <el-button size="small" type="danger" :icon="Delete" circle title="刪除" @click="removeNode(row)" />
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
       <!-- ============ 部署紀錄 ============ -->
       <el-tab-pane label="部署紀錄" name="logs">
         <el-table :data="logs" stripe border style="width: 100%" empty-text="尚無部署紀錄">
@@ -407,6 +518,40 @@ onMounted(loadAll);
       <template #footer>
         <el-button @click="ruleDlg.visible = false">取消</el-button>
         <el-button type="primary" :loading="ruleDlg.saving" @click="saveRule">儲存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 節點編輯 -->
+    <el-dialog v-model="nodeDlg.visible" :title="nodeDlg.id ? '編輯 Nginx 節點' : '新增 Nginx 節點'" width="640px" class="rwd-dialog">
+      <el-form ref="nodeFormRef" :model="nodeDlg.form" :rules="nodeRules" label-width="120px">
+        <el-form-item label="節點名稱" prop="NodeName">
+          <el-input v-model="nodeDlg.form.NodeName" maxlength="100" placeholder="nginx-node1" />
+        </el-form-item>
+        <el-form-item label="IP / 主機名稱" prop="IpAddress">
+          <el-input v-model="nodeDlg.form.IpAddress" placeholder="例：10.1.2.11" />
+        </el-form-item>
+        <el-form-item label="SSH Port">
+          <el-input-number v-model="nodeDlg.form.SshPort" :min="1" :max="65535" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="SSH 帳號" prop="SshUser">
+          <el-input v-model="nodeDlg.form.SshUser" placeholder="deployer" style="width: 220px" />
+        </el-form-item>
+        <el-form-item label="私鑰路徑">
+          <el-input v-model="nodeDlg.form.SshKeyPath" placeholder="留空則使用 .env 的 SSH_KEY_PATH" />
+          <div class="form-hint">控制層主機上的路徑，例：C:/nginx-ha-manager/keys/deployer_ed25519</div>
+        </el-form-item>
+        <el-form-item label="主機金鑰指紋" prop="HostKeySha256">
+          <div class="fp-row">
+            <el-input v-model="nodeDlg.form.HostKeySha256" placeholder="SHA256:..." />
+            <el-button :loading="nodeDlg.probing" @click="probeFingerprint">從主機讀取</el-button>
+          </div>
+          <div class="form-hint">防止中間人攻擊；讀取後請與主機上 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 的結果核對。留空則不驗證。</div>
+        </el-form-item>
+        <el-form-item label="啟用"><el-switch v-model="nodeDlg.form.IsActive" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="nodeDlg.visible = false">取消</el-button>
+        <el-button type="primary" :loading="nodeDlg.saving" @click="saveNode">儲存</el-button>
       </template>
     </el-dialog>
 
@@ -487,6 +632,10 @@ onMounted(loadAll);
 .topbar h1 { margin: 0; font-size: 22px; color: #1f2d3d; }
 .sub { color: #7b8794; font-size: 13px; margin-top: 2px; }
 .actions { display: flex; align-items: center; gap: 12px; }
+.user { color: #666; font-size: 13px; }
+.form-hint { color: #909399; font-size: 12px; line-height: 1.5; margin-top: 4px; width: 100%; }
+.fp-row { display: flex; gap: 8px; width: 100%; }
+.light.sm { width: 10px; height: 10px; display: inline-block; vertical-align: middle; margin-right: 6px; }
 
 .nodes { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 8px; }
 .node-card { flex: 1 1 280px; max-width: 420px; }

@@ -86,4 +86,35 @@ class NodeSession {
   }
 }
 
-module.exports = { NodeSession };
+/**
+ * 讀取遠端主機的 SSH 主機金鑰指紋（不需登入，只完成金鑰交換即中斷）
+ * @returns {Promise<string>} 'SHA256:xxxx'（與 ssh-keygen -lf 相同格式）
+ */
+function fetchHostFingerprint(host, port = 22, timeoutMs = config.ssh.connectTimeoutMs) {
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    let fp = '';
+    const done = (err) => {
+      clearTimeout(timer);
+      conn.end();
+      if (fp) resolve(`SHA256:${fp}`);
+      else reject(err || new Error('無法取得主機金鑰'));
+    };
+    const timer = setTimeout(() => done(new Error('連線逾時')), timeoutMs + 1000);
+    conn.on('error', (e) => done(fp ? null : e));
+    conn.connect({
+      host,
+      port,
+      username: 'fingerprint-probe',
+      readyTimeout: timeoutMs,
+      hostHash: 'sha256',
+      hostVerifier: (hashHex) => {
+        fp = hexToB64(hashHex);
+        setImmediate(() => done());
+        return false; // 拒絕繼續連線，不送出任何認證資料
+      },
+    });
+  });
+}
+
+module.exports = { NodeSession, fetchHostFingerprint, normalizeFp };

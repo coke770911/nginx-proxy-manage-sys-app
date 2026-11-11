@@ -3,9 +3,51 @@ require('dotenv').config();
 
 const bool = (v, d = false) => (v === undefined || v === '' ? d : /^(1|true|yes)$/i.test(v));
 
+const XML_NAME = /^[A-Za-z_][\w.-]*(:[A-Za-z_][\w.-]*)?$/;
+const xmlName = (v, d, key) => {
+  const s = (v || d).trim();
+  if (!XML_NAME.test(s)) throw new Error(`.env 設定 ${key} 不是合法的 XML 元素名稱：${s}`);
+  return s;
+};
+
+function regex(v, d) {
+  try { return new RegExp(v || d, 'i'); } catch (e) { throw new Error(`.env 設定 SOAP_SUCCESS_REGEX 不是合法的正規表示式：${e.message}`); }
+}
+
+// dotenv 不支援字面 \n，範本若寫成單行可用 \n 表示換行（純美觀，SOAP 不需要換行）
+const template = (process.env.SOAP_REQUEST_TEMPLATE || '').replace(/\\n/g, '\n').trim();
+
 module.exports = {
   port: parseInt(process.env.PORT || '3000', 10),
-  apiToken: process.env.API_TOKEN || '',
+  // Express trust proxy：loopback（預設）/ false / 數字（信任幾層代理）/ IP 或網段清單
+  trustProxy: (() => {
+    const v = (process.env.TRUST_PROXY || 'loopback').trim();
+    if (/^(true|false)$/i.test(v)) return /^true$/i.test(v);
+    if (/^\d+$/.test(v)) return parseInt(v, 10);
+    return v;
+  })(),
+  auth: {
+    // 特權帳號白名單（逗號分隔，不分大小寫）：必須在此名單內「且」通過 SOAP 驗證才能登入
+    adminAccounts: (process.env.ADMIN_ACCOUNTS || '')
+      .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+    jwtSecret: process.env.JWT_SECRET || '',
+    jwtExpiresIn: process.env.JWT_EXPIRES_IN || '8h',
+    maxFailures: parseInt(process.env.LOGIN_MAX_FAILURES || '5', 10),
+    lockMinutes: parseInt(process.env.LOGIN_LOCK_MINUTES || '15', 10),
+  },
+  soap: {
+    url: process.env.SOAP_URL || '',
+    version: process.env.SOAP_VERSION === '1.2' ? '1.2' : '1.1',
+    action: process.env.SOAP_ACTION || '',
+    namespace: process.env.SOAP_NAMESPACE || 'http://tempuri.org/',
+    method: xmlName(process.env.SOAP_METHOD, 'Authenticate', 'SOAP_METHOD'),
+    userField: xmlName(process.env.SOAP_USER_FIELD, 'username', 'SOAP_USER_FIELD'),
+    passField: xmlName(process.env.SOAP_PASS_FIELD, 'password', 'SOAP_PASS_FIELD'),
+    requestTemplate: template,
+    successRegex: regex(process.env.SOAP_SUCCESS_REGEX, '>\\s*true\\s*<'),
+    timeoutMs: parseInt(process.env.SOAP_TIMEOUT_MS || '10000', 10),
+    rejectUnauthorized: bool(process.env.SOAP_TLS_VERIFY, true),
+  },
   healthIntervalSec: parseInt(process.env.HEALTH_INTERVAL_SEC || '60', 10),
   db: {
     host: process.env.DB_HOST || '127.0.0.1',

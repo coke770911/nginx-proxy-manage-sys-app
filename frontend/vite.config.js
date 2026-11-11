@@ -1,13 +1,13 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
+import { fileURLToPath } from 'node:url';
 
+// 前端只負責編譯；產出直接放進後端靜態資料夾 backend/public，由後端單一 port 提供
 export default defineConfig({
   plugins: [vue()],
-  server: {
-    port: 5173,
-    proxy: {
-      // SSE 也走此代理；後端預設 3000
-      '/api': { target: 'http://127.0.0.1:3000', changeOrigin: true },
-    },
+  build: {
+    outDir: fileURLToPath(new URL('../backend/public', import.meta.url)),
+    emptyOutDir: true,
+    chunkSizeWarningLimit: 1500,
   },
 });

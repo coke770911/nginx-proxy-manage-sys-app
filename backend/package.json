@@ -4,15 +4,17 @@
   "description": "校園網域反向代理與 SSL 憑證集中管理系統 - 後端 (Control Plane)",
   "main": "src/app.js",
   "private": true,
-  "engines": { "node": ">=18.17" },
+  "engines": {
+    "node": ">=18.17"
+  },
   "scripts": {
     "start": "node src/app.js",
     "dev": "node --watch src/app.js"
   },
   "dependencies": {
-    "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.3",
     "multer": "^2.0.0",
     "sequelize": "^6.37.3",
     "ssh2": "^1.15.0",

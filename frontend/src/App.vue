@@ -1,9 +1,12 @@
 <script setup>
 import Dashboard from './views/Dashboard.vue';
+import Login from './views/Login.vue';
+import { session } from './api';
 </script>
 
 <template>
-  <Dashboard />
+  <Dashboard v-if="session.token" />
+  <Login v-else />
 </template>
 
 <style>

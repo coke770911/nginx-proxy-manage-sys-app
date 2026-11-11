@@ -10,18 +10,21 @@
 ├─ scripts/                     version.js 版號規則、release.js 發佈腳本
 ├─ .githooks/                   pre-commit（檢查 README）、pre-push（檢查版號 tag）
 ├─ database/schema.sql          SQL Server DDL + 兩台節點範例資料
-├─ backend/                     Node.js + Express + Sequelize(mssql)
+├─ backend/                     Node.js + Express + Sequelize(mssql) + JWT
+│  ├─ public/                   前端編譯產物（frontend npm run build 自動輸出，不進版控）
 │  └─ src/
-│     ├─ app.js                 進入點（API Token、靜態檔、健康檢查排程）
+│     ├─ app.js                 進入點（JWT 驗證、靜態檔、健康檢查排程，單一 port）
 │     ├─ config/ db/ models/    設定、連線、4 張資料表 Model
+│     ├─ routes/authRoutes.js   登入 API、JWT 驗證中介層、登入失敗鎖定
 │     ├─ routes/proxyRoutes.js  REST API + SSE 即時 Log
 │     └─ services/
+│        ├─ soapAuth.js         SOAP 帳號密碼驗證
 │        ├─ certService.js      憑證解析 / 公私鑰比對 / PFX 轉檔
 │        ├─ nginxTemplate.js    .conf 生成器（含欄位白名單驗證）
 │        ├─ sshSession.js       SSH+SFTP 連線封裝（可驗證主機金鑰）
 │        ├─ deployService.js    雙機兩階段部署與回滾引擎
 │        └─ healthService.js    節點燈號（SSH + nginx active）
-└─ frontend/                    Vue 3 + Vite + Element Plus（src/views/Dashboard.vue）
+└─ frontend/                    Vue 3 + Vite + Element Plus（views/Login.vue、views/Dashboard.vue）
 ```
 
 ## 快速開始
@@ -30,15 +33,44 @@
 # 1. 建資料庫（SSMS 或 sqlcmd 執行）
 sqlcmd -S <host> -U sa -i database/schema.sql
 
-# 2. 後端
-cd backend && cp .env.example .env   # 填入 DB、SSH_KEY_PATH、API_TOKEN
-npm install && npm start             # 控制層主機需安裝 openssl（PFX 轉檔用）
+# 2. 設定（Windows：copy backend\.env.example backend\.env）
+cp backend/.env.example backend/.env
+#    必填：DB_*、JWT_SECRET、ADMIN_ACCOUNTS、SOAP_*、SSH_KEY_PATH
 
-# 3. 前端
-cd frontend && npm install
-npm run dev                          # 開發：http://localhost:5173（/api 代理到 :3000）
-npm run build                        # 正式：產生 dist/，後端會自動以 Express 提供
+# 3. 安裝、編譯前端、啟動（皆在專案根目錄執行）
+npm run install:all                  # 安裝 backend 與 frontend 相依套件
+npm run build                        # 前端編譯，輸出到 backend/public
+npm start                            # 啟動後端：http://localhost:3000（前端與 API 同一個 port）
 ```
+
+- 系統**只有後端一個 port**（`PORT`，預設 3000）：前端編譯結果放在 `backend/public`，由 Express 直接提供，不再使用 Vite 開發伺服器。
+- 修改前端時可在 `frontend` 執行 `npm run watch`，存檔即自動重新編譯到 `backend/public`，重新整理瀏覽器即可。
+- 控制層主機需安裝 openssl（PFX 轉檔用）。
+
+## 登入與權限（SOAP + JWT）
+
+登入條件需**同時**滿足：
+
+1. 帳號列在 `backend/.env` 的 `ADMIN_ACCOUNTS`（特權帳號白名單，逗號分隔、不分大小寫）。
+2. 帳號密碼通過 `SOAP_URL` 指定的 SOAP 認證服務驗證。
+
+登入成功後後端簽發 JWT（HS256，`JWT_SECRET` 簽章，有效時間 `JWT_EXPIRES_IN`），前端存於 `sessionStorage`，之後所有 API 以 `Authorization: Bearer <token>` 驗證；SSE 即時 Log 因 EventSource 無法帶標頭，改以 `?token=` 傳遞。每次請求都會重新比對白名單，帳號從 `ADMIN_ACCOUNTS` 移除並重啟後端後，已簽發的 Token 立即失效。部署紀錄的「操作者」會記錄登入帳號。
+
+| 設定 | 說明 |
+|---|---|
+| `ADMIN_ACCOUNTS` | 特權帳號白名單，例：`admin01,netops` |
+| `JWT_SECRET` | 至少 32 字元，未設定則後端拒絕啟動；更換後所有人需重新登入 |
+| `JWT_EXPIRES_IN` | Token 有效時間，例：`30m`、`8h` |
+| `LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES` | 同一 IP + 帳號連續失敗次數上限與鎖定分鐘數 |
+| `SOAP_URL` / `SOAP_VERSION` / `SOAP_ACTION` | SOAP 服務端點、版本（1.1 / 1.2）、SOAPAction |
+| `SOAP_NAMESPACE` / `SOAP_METHOD` / `SOAP_USER_FIELD` / `SOAP_PASS_FIELD` | 自動組出 `<METHOD xmlns="NAMESPACE"><USER_FIELD>…</USER_FIELD><PASS_FIELD>…</PASS_FIELD></METHOD>` |
+| `SOAP_REQUEST_TEMPLATE` | 選填：完整 Envelope 範本（單行），`{{username}}` / `{{password}}` 自動帶入並 XML 跳脫 |
+| `SOAP_SUCCESS_REGEX` | 回應內容符合此正規表示式才算成功，例：`<AuthenticateResult>\s*true\s*</AuthenticateResult>` |
+| `SOAP_TLS_VERIFY` | SOAP 服務使用自簽憑證時設 `false` |
+| `TRUST_PROXY` | 前方有反向代理時調整（預設 `loopback`），避免偽造 X-Forwarded-For 繞過登入鎖定 |
+
+- 不在白名單的帳號不會送往 SOAP 服務，但回應訊息與密碼錯誤相同，避免帳號被列舉。
+- SOAP 回應為 SOAP Fault 或 HTTP 狀態非 200 一律視為驗證失敗；服務無法連線時回 502。
 
 ## Ubuntu 節點事前準備（兩台皆需）
 
@@ -52,6 +84,19 @@ sudo chmod 750 /etc/nginx/ssl
 ```
 
 `deployer` 需能寫入上述兩個目錄（本系統不使用 sudo 寫檔），sudoers 僅需 `nginx -t` 與 `systemctl reload nginx`。主機金鑰指紋可填入 `ProxyNodes.HostKeySha256`（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 的 `SHA256:...`）以防中間人。
+
+## 節點管理
+
+`schema.sql` 只建立兩筆範例節點（`192.168.10.11/12`），請登入後到「Nginx 節點」分頁（或點節點卡片上的編輯鈕）改成實際主機：
+
+| 欄位 | 說明 |
+|---|---|
+| 節點名稱 / IP / SSH Port / SSH 帳號 | IP 可填 IPv4 或主機名稱；帳號預設 `deployer` |
+| 私鑰路徑 | 控制層主機上的私鑰檔；留空則使用 `.env` 的 `SSH_KEY_PATH` |
+| 主機金鑰指紋 | `SHA256:...`；按「從主機讀取」會連到該主機取得指紋（只做金鑰交換、不登入），讀取後請與主機上 `ssh-keygen -lf` 的結果核對。留空則不驗證 |
+| 啟用 | 部署只會推送到啟用中的節點 |
+
+可新增、編輯、刪除節點；刪除節點不會清除該主機上已部署的設定。儲存後按節點列右側的「重新檢測」確認燈號。
 
 ## 部署流程對照
 
@@ -69,7 +114,7 @@ sudo chmod 750 /etc/nginx/ssl
 - **私鑰存放**：`KeyPem` 以明文存於 SQL Server，請限制 DB 存取，並建議啟用 TDE / 欄位加密；備份檔 `/tmp/nginx_backup.tar.gz` 含私鑰，權限為 600。
 - **真實客戶端 IP**：F5 為 L4 Passthrough，Nginx 看到的 `$remote_addr` 為 F5 位址（若有 SNAT）。要取得真實 IP 需 F5 不做 SNAT，或改用 PROXY protocol（Nginx 加 `listen ... proxy_protocol` 與 `real_ip` 設定）。
 - **`/f5-health-check`** 設於每個網域的 80/443 server；F5 以 IP 探測時會落到第一個 server block，仍會回 200。
-- **認證**：目前以 `API_TOKEN` 簡易保護；若需 AD/LDAP 登入可在 `authGuard` 處替換。
+- **認證**：SOAP 帳密驗證 + `ADMIN_ACCOUNTS` 白名單 + JWT，詳見上方「登入與權限」；正式環境請以 HTTPS 提供本系統，避免帳密與 Token 以明文傳輸。
 - 版本相容：Ubuntu 24.04 的 nginx 為 1.24，故使用 `listen 443 ssl http2;`；升級至 ≥1.25.1 後可改 `http2 on;`。
 - 自訂 Nginx 語法插入 443 server 區塊（位於 `location /` 之前），僅檢查大括號成對，語法正確性由 `nginx -t` 把關。
 
