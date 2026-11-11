@@ -13,7 +13,7 @@
  */
 const EventEmitter = require('events');
 const config = require('../config');
-const { ProxyNode, DomainRule, SslCertificate, DeployLog } = require('../models');
+const { ProxyNode, DomainRule, RuleUpstream, SslCertificate, DeployLog } = require('../models');
 const { NodeSession } = require('./sshSession');
 const { validateRule, renderConf, confFileName, certRemotePaths } = require('./nginxTemplate');
 
@@ -74,8 +74,8 @@ async function forAll(sessions, step, fn, ctx) {
 async function buildFileSet(log) {
   const rules = await DomainRule.findAll({
     where: { IsActive: true },
-    include: [{ model: SslCertificate, as: 'certificate' }],
-    order: [['DomainName', 'ASC']],
+    include: [{ model: SslCertificate, as: 'certificate' }, { model: RuleUpstream, as: 'Upstreams' }],
+    order: [['DomainName', 'ASC'], [{ model: RuleUpstream, as: 'Upstreams' }, 'SortOrder', 'ASC'], [{ model: RuleUpstream, as: 'Upstreams' }, 'Id', 'ASC']],
   });
   const confs = new Map(); // fileName → content
   const certs = new Map(); // certId → { crt, key }

@@ -3,7 +3,7 @@ const express = require('express');
 const multer = require('multer');
 const { fn, col } = require('sequelize');
 const { Op } = require('sequelize');
-const { ProxyNode, SslCertificate, DomainRule, DeployLog, AuditLog } = require('../models');
+const { sequelize, ProxyNode, SslCertificate, DomainRule, RuleUpstream, DeployLog, AuditLog } = require('../models');
 const audit = require('../services/auditService');
 const certService = require('../services/certService');
 const { validateRule, renderConf } = require('../services/nginxTemplate');
@@ -169,10 +169,12 @@ router.delete('/certificates/:id', wrap(async (req, res) => {
 
 /* =============================================================== 網域規則 DomainRules */
 const RULE_FIELDS = [
-  'DomainName', 'TargetIp', 'TargetPort', 'CertificateId', 'ForceHttps', 'EnableWebSocket',
-  'ClientMaxBodySize', 'IsActive', 'IsMaintenance', 'CustomNginxSnippet', 'Remark',
+  'DomainName', 'CertificateId', 'ForceHttps', 'EnableWebSocket',
+  'ClientMaxBodySize', 'IsActive', 'IsMaintenance', 'CustomNginxSnippet', 'Remark', 'LbMethod', 'LbCookieName',
 ];
 const RULE_BOOLS = ['ForceHttps', 'EnableWebSocket', 'IsActive', 'IsMaintenance'];
+const UP_ORDER = [[{ model: RuleUpstream, as: 'Upstreams' }, 'SortOrder', 'ASC'], [{ model: RuleUpstream, as: 'Upstreams' }, 'Id', 'ASC']];
+const withUpstreams = { model: RuleUpstream, as: 'Upstreams', attributes: ['Id', 'Host', 'Port', 'Weight', 'IsBackup', 'IsActive', 'SortOrder'] };
 
 async function checkRule(plain) {
   const errs = validateRule(plain);
@@ -188,49 +190,101 @@ function normalizeRule(data) {
   const out = { ...data };
   RULE_BOOLS.forEach((k) => { if (k in out) out[k] = toBool(out[k]); });
   if ('DomainName' in out) out.DomainName = String(out.DomainName).trim().toLowerCase();
-  if ('TargetIp' in out) out.TargetIp = String(out.TargetIp).trim();
-  if ('TargetPort' in out) out.TargetPort = Number(out.TargetPort);
   if ('ClientMaxBodySize' in out) out.ClientMaxBodySize = String(out.ClientMaxBodySize).trim();
+  if ('LbMethod' in out) out.LbMethod = String(out.LbMethod || 'round_robin').trim();
+  if ('LbCookieName' in out) out.LbCookieName = String(out.LbCookieName || '').trim() || null;
+  if (out.LbMethod && out.LbMethod !== 'cookie') out.LbCookieName = null;
   return out;
+}
+
+/** 前端送來的後端清單 → 乾淨陣列；未提供時回 undefined（代表不變更） */
+function normalizeUpstreams(body) {
+  if (body.Upstreams === undefined) {
+    // 相容舊版 API：只送 TargetIp / TargetPort 時視為唯一一台後端
+    if (body.TargetIp !== undefined) return [{ Host: String(body.TargetIp).trim(), Port: Number(body.TargetPort || 80), Weight: 1, IsBackup: false, IsActive: true }];
+    return undefined;
+  }
+  if (!Array.isArray(body.Upstreams)) throw new HttpError(400, '後端主機清單格式不正確');
+  if (!body.Upstreams.length) throw new HttpError(400, '至少要設定一台後端主機');
+  return body.Upstreams.map((u, i) => ({
+    Host: String(u?.Host || '').trim(),
+    Port: Number(u?.Port),
+    Weight: u?.Weight === undefined || u?.Weight === '' ? 1 : Number(u.Weight),
+    IsBackup: toBool(u?.IsBackup),
+    IsActive: u?.IsActive === undefined ? true : toBool(u.IsActive),
+    SortOrder: i,
+  }));
+}
+
+/** TargetIp / TargetPort 保留為第一台啟用中的主要後端（列表顯示、相容舊版） */
+function primaryOf(ups) {
+  const p = ups.find((u) => u.IsActive && !u.IsBackup) || ups[0];
+  return { TargetIp: p.Host, TargetPort: p.Port };
+}
+
+/** 操作紀錄用：後端清單轉成一行文字 */
+const upText = (ups) => (ups || []).map((u) => `${u.Host}:${u.Port}${Number(u.Weight) > 1 ? ` 權重${u.Weight}` : ''}${u.IsBackup ? ' 備援' : ''}${u.IsActive === false ? ' 停用' : ''}`).join('、');
+
+async function replaceUpstreams(ruleId, ups, transaction) {
+  await RuleUpstream.destroy({ where: { RuleId: ruleId }, transaction });
+  await RuleUpstream.bulkCreate(ups.map((u) => ({ ...u, RuleId: ruleId })), { transaction });
+}
+
+async function loadRule(id) {
+  return DomainRule.findByPk(id, { include: [withUpstreams], order: UP_ORDER });
 }
 
 router.get('/rules', wrap(async (req, res) => {
   res.json(await DomainRule.findAll({
-    include: [{ model: SslCertificate, as: 'certificate', attributes: ['Id', 'Alias', 'ValidTo', 'SanDomains'] }],
-    order: [['DomainName', 'ASC']],
+    include: [{ model: SslCertificate, as: 'certificate', attributes: ['Id', 'Alias', 'ValidTo', 'SanDomains'] }, withUpstreams],
+    order: [['DomainName', 'ASC'], ...UP_ORDER],
   }));
 }));
 
 router.post('/rules', wrap(async (req, res) => {
-  const data = normalizeRule({ ClientMaxBodySize: '50M', ...pick(req.body, RULE_FIELDS) });
-  await checkRule(data);
-  const rule = await DomainRule.create(data);
-  await audit.record(req, { action: 'CREATE', targetType: 'RULE', targetId: rule.Id, targetName: rule.DomainName, detail: audit.snapshot(data) });
-  res.status(201).json(rule);
+  const data = normalizeRule({ ClientMaxBodySize: '50M', LbMethod: 'round_robin', ...pick(req.body, RULE_FIELDS) });
+  const ups = normalizeUpstreams(req.body || {});
+  if (!ups) throw new HttpError(400, '至少要設定一台後端主機');
+  await checkRule({ ...data, Upstreams: ups });
+  const created = await sequelize.transaction(async (t) => {
+    const rule = await DomainRule.create({ ...data, ...primaryOf(ups) }, { transaction: t });
+    await replaceUpstreams(rule.Id, ups, t);
+    return rule;
+  });
+  await audit.record(req, { action: 'CREATE', targetType: 'RULE', targetId: created.Id, targetName: created.DomainName, detail: { ...audit.snapshot(data), Upstreams: upText(ups) } });
+  res.status(201).json(await loadRule(created.Id));
 }));
 
 router.put('/rules/:id', wrap(async (req, res) => {
-  const rule = await DomainRule.findByPk(req.params.id);
+  const rule = await loadRule(req.params.id);
   if (!rule) throw new HttpError(404, '規則不存在');
+  const before = rule.get({ plain: true });
+  const beforeUps = (before.Upstreams || []).map((u) => ({ ...u }));
   const data = normalizeRule(pick(req.body, RULE_FIELDS));
-  const before = { ...rule.get({ plain: true }) };
-  await checkRule({ ...before, ...data });
-  await rule.update(data);
-  await audit.record(req, { action: 'UPDATE', targetType: 'RULE', targetId: rule.Id, targetName: rule.DomainName, detail: audit.diff(before, data) });
-  res.json(rule);
+  const ups = normalizeUpstreams(req.body || {});
+  await checkRule({ ...before, ...data, Upstreams: ups || beforeUps });
+  await sequelize.transaction(async (t) => {
+    await rule.update({ ...data, ...(ups ? primaryOf(ups) : {}) }, { transaction: t });
+    if (ups) await replaceUpstreams(rule.Id, ups, t);
+  });
+  const detail = audit.diff({ ...before }, data);
+  if (ups && upText(ups) !== upText(beforeUps)) detail.Upstreams = [upText(beforeUps), upText(ups)];
+  await audit.record(req, { action: 'UPDATE', targetType: 'RULE', targetId: rule.Id, targetName: rule.DomainName, detail });
+  res.json(await loadRule(rule.Id));
 }));
 
 router.delete('/rules/:id', wrap(async (req, res) => {
-  const rule = await DomainRule.findByPk(req.params.id);
+  const rule = await loadRule(req.params.id);
   if (!rule) throw new HttpError(404, '規則不存在');
-  await rule.destroy();
-  await audit.record(req, { action: 'DELETE', targetType: 'RULE', targetId: rule.Id, targetName: rule.DomainName, detail: audit.snapshot(rule.get({ plain: true }), RULE_FIELDS) });
+  const plain = rule.get({ plain: true });
+  await rule.destroy(); // RuleUpstreams 由外鍵 ON DELETE CASCADE 一併刪除
+  await audit.record(req, { action: 'DELETE', targetType: 'RULE', targetId: rule.Id, targetName: rule.DomainName, detail: { ...audit.snapshot(plain, RULE_FIELDS), Upstreams: upText(plain.Upstreams) } });
   res.json({ ok: true });
 }));
 
 /** 預覽該規則將生成的 Nginx 設定檔 */
 router.get('/rules/:id/preview', wrap(async (req, res) => {
-  const rule = await DomainRule.findByPk(req.params.id);
+  const rule = await loadRule(req.params.id);
   if (!rule) throw new HttpError(404, '規則不存在');
   res.type('text/plain; charset=utf-8').send(renderConf(rule.get({ plain: true })));
 }));

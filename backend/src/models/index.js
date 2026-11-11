@@ -46,7 +46,20 @@ const DomainRule = sequelize.define('DomainRule', {
   IsMaintenance: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   CustomNginxSnippet: { type: DataTypes.TEXT },
   Remark: { type: DataTypes.STRING(500) },
+  LbMethod: { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'round_robin' },
+  LbCookieName: { type: DataTypes.STRING(64) },
 }, { tableName: 'DomainRules', ...stamps });
+
+const RuleUpstream = sequelize.define('RuleUpstream', {
+  Id: pk(),
+  RuleId: { type: DataTypes.INTEGER, allowNull: false },
+  Host: { type: DataTypes.STRING(255), allowNull: false },
+  Port: { type: DataTypes.INTEGER, allowNull: false },
+  Weight: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },
+  IsBackup: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  IsActive: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+  SortOrder: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+}, { tableName: 'RuleUpstreams', freezeTableName: true, timestamps: false });
 
 const DeployLog = sequelize.define('DeployLog', {
   Id: pk(DataTypes.BIGINT),
@@ -86,5 +99,7 @@ const AdminAccount = sequelize.define('AdminAccount', {
 
 DomainRule.belongsTo(SslCertificate, { foreignKey: 'CertificateId', as: 'certificate' });
 SslCertificate.hasMany(DomainRule, { foreignKey: 'CertificateId', as: 'rules' });
+DomainRule.hasMany(RuleUpstream, { foreignKey: 'RuleId', as: 'Upstreams', onDelete: 'CASCADE' });
+RuleUpstream.belongsTo(DomainRule, { foreignKey: 'RuleId' });
 
-module.exports = { sequelize, ProxyNode, SslCertificate, DomainRule, DeployLog, AuditLog, AdminAccount };
+module.exports = { sequelize, ProxyNode, SslCertificate, DomainRule, RuleUpstream, DeployLog, AuditLog, AdminAccount };

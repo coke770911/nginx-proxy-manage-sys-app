@@ -87,6 +87,47 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_DomainRules_Certifica
     CREATE INDEX IX_DomainRules_CertificateId ON dbo.DomainRules (CertificateId);
 GO
 
+/* ---- 負載平衡（v1.0.4 起）：分配方式
+        round_robin = 輪流（預設）；least_conn = 最少連線；cookie = 依 Cookie 固定到同一台（hash $cookie_<名稱> consistent）
+        TargetIp / TargetPort 保留為「第一台主要後端」，供列表顯示與相容舊版 ---- */
+IF COL_LENGTH(N'dbo.DomainRules', N'LbMethod') IS NULL
+    ALTER TABLE dbo.DomainRules ADD
+        LbMethod     NVARCHAR(16) NOT NULL CONSTRAINT DF_DomainRules_LbMethod DEFAULT (N'round_robin'),
+        LbCookieName NVARCHAR(64) NULL;
+GO
+IF OBJECT_ID(N'CK_DomainRules_LbMethod', N'C') IS NULL
+    ALTER TABLE dbo.DomainRules ADD CONSTRAINT CK_DomainRules_LbMethod CHECK (LbMethod IN (N'round_robin', N'least_conn', N'cookie'));
+GO
+
+/* ---------------------------------------------------------------------------
+   3b. RuleUpstreams — 每條規則的後端主機清單（Nginx upstream 成員）
+       Weight：權重 1–100；IsBackup：備援機（主要後端都失效時才使用，cookie 分配方式不可用）
+   --------------------------------------------------------------------------- */
+IF OBJECT_ID(N'dbo.RuleUpstreams', N'U') IS NULL
+CREATE TABLE dbo.RuleUpstreams (
+    Id        INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_RuleUpstreams PRIMARY KEY,
+    RuleId    INT               NOT NULL,
+    Host      NVARCHAR(255)     NOT NULL,
+    Port      INT               NOT NULL,
+    Weight    INT               NOT NULL CONSTRAINT DF_RuleUpstreams_Weight DEFAULT (1),
+    IsBackup  BIT               NOT NULL CONSTRAINT DF_RuleUpstreams_Backup DEFAULT (0),
+    IsActive  BIT               NOT NULL CONSTRAINT DF_RuleUpstreams_Active DEFAULT (1),
+    SortOrder INT               NOT NULL CONSTRAINT DF_RuleUpstreams_Sort DEFAULT (0),
+    CONSTRAINT FK_RuleUpstreams_Rule FOREIGN KEY (RuleId) REFERENCES dbo.DomainRules (Id) ON DELETE CASCADE,
+    CONSTRAINT CK_RuleUpstreams_Port   CHECK (Port BETWEEN 1 AND 65535),
+    CONSTRAINT CK_RuleUpstreams_Weight CHECK (Weight BETWEEN 1 AND 100)
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_RuleUpstreams_RuleId')
+    CREATE INDEX IX_RuleUpstreams_RuleId ON dbo.RuleUpstreams (RuleId, SortOrder);
+GO
+-- 舊版規則轉換：沒有後端清單的規則，以原本的 TargetIp:TargetPort 建立一台後端（效果與舊版相同）
+INSERT INTO dbo.RuleUpstreams (RuleId, Host, Port, Weight, IsBackup, IsActive, SortOrder)
+SELECT r.Id, r.TargetIp, r.TargetPort, 1, 0, 1, 0
+FROM dbo.DomainRules r
+WHERE NOT EXISTS (SELECT 1 FROM dbo.RuleUpstreams u WHERE u.RuleId = r.Id);
+GO
+
 /* ---------------------------------------------------------------------------
    4. DeployLogs — 部署紀錄
       Status: RUNNING / SUCCESS / FAILED(未變更或回滾失敗) / ROLLED_BACK(已自動回滾) / PARTIAL(部分節點 reload 失敗)

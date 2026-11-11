@@ -9,12 +9,12 @@
 ├─ VERSION                      版號唯一來源（由 npm run release 維護）
 ├─ scripts/                     version.js 版號規則、release.js 發佈腳本
 ├─ .githooks/                   pre-commit（檢查 README）、pre-push（檢查版號 tag）
-├─ database/schema.sql          SQL Server DDL（6 張資料表）+ 兩台節點範例資料
+├─ database/schema.sql          SQL Server DDL（7 張資料表，可重複執行並自動轉換舊資料）+ 兩台節點範例資料
 ├─ backend/                     Node.js + Express + Sequelize(mssql) + JWT
 │  ├─ public/                   前端編譯產物（frontend npm run build 自動輸出，不進版控）
 │  └─ src/
 │     ├─ app.js                 進入點（JWT 驗證、靜態檔、健康檢查排程，單一 port）
-│     ├─ config/ db/ models/    設定、連線、6 張資料表 Model
+│     ├─ config/ db/ models/    設定、連線、7 張資料表 Model
 │     ├─ routes/authRoutes.js   登入 API、JWT 驗證中介層、登入失敗鎖定
 │     ├─ routes/proxyRoutes.js  REST API + SSE 即時 Log + 操作紀錄查詢
 │     ├─ routes/accountRoutes.js 帳號管理 API
@@ -23,7 +23,7 @@
 │        ├─ accountService.js   可登入名單（資料庫帳號 + .env 特權帳號）
 │        ├─ auditService.js     系統操作紀錄寫入（不含密碼 / 私鑰）
 │        ├─ certService.js      憑證解析 / 公私鑰比對 / PFX 轉檔
-│        ├─ nginxTemplate.js    .conf 生成器（含欄位白名單驗證）
+│        ├─ nginxTemplate.js    .conf 生成器（upstream 負載平衡、欄位白名單驗證）
 │        ├─ sshSession.js       SSH+SFTP 連線封裝（可驗證主機金鑰）
 │        ├─ deployService.js    雙機兩階段部署與回滾引擎
 │        └─ healthService.js    節點燈號（SSH + nginx active）與 CPU / RAM / 硬碟使用率
@@ -110,7 +110,35 @@ npm start                            # 啟動後端：http://localhost:3000（�
 
 ## 網域規則搜尋
 
-「網域對照規則」分頁上方的搜尋框可用**來源網域**或**後端 IP / Port** 即時過濾（例如 `portal`、`10.0.0.21`、`:8080`），並顯示符合筆數。
+「網域對照規則」分頁上方的搜尋框可用**來源網域**或**任一台後端的 IP / Port** 即時過濾（例如 `portal`、`10.0.0.21`、`:8080`），並顯示符合筆數。
+
+## 負載平衡（一條規則對多台後端）
+
+每條網域規則可設定多台後端主機（資料表 `RuleUpstreams`），部署時寫入節點 Nginx 的 `upstream` 區塊，由 Nginx 分配流量：
+
+```
+使用者 → F5 ─┬→ nginx-node1 ─┬→ 後端 A
+             └→ nginx-node2 ─┴→ 後端 B
+        F5 分流到兩台 Nginx      Nginx 依規則分流到多台後端
+```
+
+| 設定 | 說明 | 產生的 Nginx 語法 |
+|---|---|---|
+| 權重 1–100 | 數字越大分到越多流量 | `server 10.0.0.21:8080 weight=3;` |
+| 備援 | 主要後端都失效時才使用 | `server ... backup;` |
+| 啟用 | 關閉 = 暫時下線維護，不寫入設定 | （不產生該行） |
+| 分配方式：輪流（預設） | 依權重輪流 | — |
+| 分配方式：最少連線 | 優先送給連線數最少的主機 | `least_conn;` |
+| 分配方式：依 Cookie 固定 | 同一個 Cookie 值固定送同一台（例：`JSESSIONID`） | `hash $cookie_JSESSIONID consistent;` |
+
+- **故障切換**：每台 `max_fails=3 fail_timeout=10s`（10 秒內失敗 3 次即暫停 10 秒）；多台後端時，連線失敗、逾時或回 502/503/504 會自動改送下一台（最多 3 次，連線逾時縮短為 5 秒）。Nginx 預設不重送 POST 等非冪等請求，避免重複寫入。
+- **限制**：
+  - 不提供「依來源 IP 固定」（`ip_hash`）：F5 若做 SNAT，所有請求來源都是 F5，會全部送到同一台。
+  - 「依 Cookie 固定」不能搭配備援機（nginx hash 不支援 `backup`）；第一次連線還沒有 Cookie 時會依雜湊分到某一台。
+  - 故障偵測為被動式（免費版 Nginx 沒有主動健康檢查），要等真實請求失敗才會暫停該台。
+- **與舊版相容**：`schema.sql` 會自動把既有規則的「後端 IP / Port」轉成只有一台後端的清單，產生的設定效果相同；`TargetIp` / `TargetPort` 保留為第一台主要後端。
+- 每條規則的 upstream 名稱為 `rule<規則編號>_backend`，並啟用 `keepalive 16` 重用與後端的連線。
+- 後端清單的變動會以「舊清單 → 新清單」寫入操作紀錄。
 
 ## Ubuntu 節點事前準備（兩台皆需）
 

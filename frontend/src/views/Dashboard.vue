@@ -66,7 +66,7 @@ const filteredRules = computed(() => {
   const q = ruleQuery.value.trim().toLowerCase();
   if (!q) return rules.value;
   return rules.value.filter((r) => r.DomainName.toLowerCase().includes(q)
-    || `${r.TargetIp}:${r.TargetPort}`.toLowerCase().includes(q));
+    || ruleUpstreams(r).some((u) => `${u.Host}:${u.Port}`.toLowerCase().includes(q)));
 });
 
 /* ------------------------------------------------------------------ 操作紀錄 */
@@ -106,6 +106,7 @@ const FIELD_LABEL = {
   CustomNginxSnippet: '自訂 Nginx 語法', Remark: '備註', NodeName: '節點名稱', IpAddress: 'IP', SshPort: 'SSH Port',
   SshUser: 'SSH 帳號', SshKeyPath: '私鑰路徑', HostKeySha256: '主機指紋', Alias: '別名', SanDomains: '涵蓋網域',
   Issuer: '發行商', Fingerprint: '憑證指紋', ValidTo: '到期日', Username: '帳號', DisplayName: '姓名 / 單位',
+  Upstreams: '後端主機', LbMethod: '分配方式', LbCookieName: 'Cookie 名稱',
   reason: '原因', source: '帳號來源', status: '狀態', message: '訊息',
 };
 const auditDetail = (d) => {
@@ -278,23 +279,43 @@ async function removeNode(row) {
 }
 
 /* ------------------------------------------------------------------ 網域規則 CRUD */
+const blankUpstream = () => ({ Host: '', Port: 80, Weight: 1, IsBackup: false, IsActive: true });
 const blankRule = () => ({
-  DomainName: '', TargetIp: '', TargetPort: 80, CertificateId: null,
+  DomainName: '', CertificateId: null,
   ForceHttps: true, EnableWebSocket: false, ClientMaxBodySize: '50M',
   IsActive: true, IsMaintenance: false, CustomNginxSnippet: '', Remark: '',
+  LbMethod: 'round_robin', LbCookieName: '', Upstreams: [blankUpstream()],
 });
+const LB_METHOD = {
+  round_robin: { text: '輪流', hint: '依權重輪流分配，適合大多數系統' },
+  least_conn: { text: '最少連線', hint: '優先送給目前連線數最少的主機，適合處理時間長短差異大的系統' },
+  cookie: { text: '依 Cookie 固定', hint: '同一個 Cookie 值固定送到同一台，適合登入狀態存在單台記憶體的舊系統；不可搭配備援機' },
+};
+const ruleUpstreams = (r) => (r.Upstreams && r.Upstreams.length ? r.Upstreams : [{ Host: r.TargetIp, Port: r.TargetPort, Weight: 1, IsBackup: false, IsActive: true }]);
+const HOST_PATTERN = /^[A-Za-z0-9]([A-Za-z0-9.-]{0,253}[A-Za-z0-9])?$/;
+function validateUpstreams(_rule, _v, cb) {
+  const f = ruleDlg.form;
+  if (!f.Upstreams.length) return cb(new Error('至少要設定一台後端主機'));
+  const bad = f.Upstreams.findIndex((u) => !HOST_PATTERN.test(String(u.Host || '').trim()));
+  if (bad >= 0) return cb(new Error(`第 ${bad + 1} 台後端的 IP / 主機名稱格式不正確`));
+  if (!f.Upstreams.some((u) => u.IsActive && !u.IsBackup)) return cb(new Error('至少要有一台「啟用中」且「非備援」的後端主機'));
+  if (f.LbMethod === 'cookie' && f.Upstreams.some((u) => u.IsActive && u.IsBackup)) return cb(new Error('「依 Cookie 固定」不能搭配備援機'));
+  return cb();
+}
 const ruleDlg = reactive({ visible: false, id: null, saving: false, form: blankRule() });
 const ruleFormRef = ref();
 const ruleRules = {
   DomainName: [{ required: true, message: '請輸入來源網域', trigger: 'blur' }],
-  TargetIp: [{ required: true, message: '請輸入後端 IP', trigger: 'blur' }],
-  TargetPort: [{ required: true, message: '請輸入 Port', trigger: 'blur' }],
+  Upstreams: [{ validator: validateUpstreams, trigger: 'submit' }],
+  LbCookieName: [{ validator: (_r, v, cb) => (ruleDlg.form.LbMethod !== 'cookie' || /^[A-Za-z0-9_]{1,64}$/.test(v || '') ? cb() : cb(new Error('Cookie 名稱只能用英數字與底線'))), trigger: 'blur' }],
   CertificateId: [{ required: true, message: '請選擇 SSL 憑證', trigger: 'change' }],
 };
 
 function openRule(row) {
   ruleDlg.id = row ? row.Id : null;
-  ruleDlg.form = row ? { ...blankRule(), ...row, certificate: undefined } : blankRule();
+  ruleDlg.form = row
+    ? { ...blankRule(), ...row, certificate: undefined, LbCookieName: row.LbCookieName || '', Upstreams: ruleUpstreams(row).map(({ Host, Port, Weight, IsBackup, IsActive }) => ({ Host, Port, Weight, IsBackup, IsActive })) }
+    : blankRule();
   ruleDlg.visible = true;
 }
 
@@ -302,8 +323,8 @@ async function saveRule() {
   await ruleFormRef.value.validate();
   ruleDlg.saving = true;
   try {
-    const body = { ...ruleDlg.form };
-    delete body.certificate;
+    const body = { ...ruleDlg.form, Upstreams: ruleDlg.form.Upstreams.map((u) => ({ ...u, Host: String(u.Host).trim() })) };
+    ['certificate', 'TargetIp', 'TargetPort', 'Id', 'CreatedAt', 'UpdatedAt'].forEach((k) => delete body[k]);
     if (ruleDlg.id) await api.put(`/rules/${ruleDlg.id}`, body);
     else await api.post('/rules', body);
     ElMessage.success('已儲存（需按「一鍵同步部署」才會生效）');
@@ -512,8 +533,20 @@ onMounted(loadAll);
         </div>
         <el-table :data="filteredRules" stripe border style="width: 100%" :empty-text="ruleQuery ? '查無符合的規則' : '尚無規則'">
           <el-table-column prop="DomainName" label="來源網域" min-width="200" fixed />
-          <el-table-column label="後端目標" min-width="160">
-            <template #default="{ row }">{{ row.TargetIp }}:{{ row.TargetPort }}</template>
+          <el-table-column label="後端目標" min-width="200">
+            <template #default="{ row }">
+              <div class="ups">
+                <div v-for="(u, i) in ruleUpstreams(row)" :key="i" class="ups-item" :class="{ off: !u.IsActive }">
+                  {{ u.Host }}:{{ u.Port }}
+                  <el-tag v-if="u.Weight > 1" size="small" type="info">×{{ u.Weight }}</el-tag>
+                  <el-tag v-if="u.IsBackup" size="small" type="warning">備援</el-tag>
+                  <el-tag v-if="!u.IsActive" size="small" type="info">停用</el-tag>
+                </div>
+                <el-tag v-if="ruleUpstreams(row).length > 1 || row.LbMethod !== 'round_robin'" size="small" effect="plain" class="ups-method">
+                  {{ (LB_METHOD[row.LbMethod] || {}).text || row.LbMethod }}{{ row.LbMethod === 'cookie' ? `：${row.LbCookieName}` : '' }}
+                </el-tag>
+              </div>
+            </template>
           </el-table-column>
           <el-table-column label="SSL 憑證" min-width="230">
             <template #default="{ row }">
@@ -724,9 +757,28 @@ onMounted(loadAll);
     <el-dialog v-model="ruleDlg.visible" :title="ruleDlg.id ? '編輯網域規則' : '新增網域規則'" width="680px" top="5vh" class="rwd-dialog">
       <el-form ref="ruleFormRef" :model="ruleDlg.form" :rules="ruleRules" label-width="130px" label-position="right">
         <el-form-item label="來源網域" prop="DomainName"><el-input v-model="ruleDlg.form.DomainName" placeholder="portal.aeust.edu.tw" /></el-form-item>
-        <el-form-item label="後端 IP / Port" required>
-          <el-input v-model="ruleDlg.form.TargetIp" placeholder="10.0.0.21" style="width: 62%" />
-          <el-input-number v-model="ruleDlg.form.TargetPort" :min="1" :max="65535" controls-position="right" style="width: 36%; margin-left: 2%" />
+        <el-form-item label="後端主機" prop="Upstreams" required>
+          <div class="ups-edit">
+            <div class="ups-head"><span>IP / 主機名稱</span><span>Port</span><span>權重</span><span>備援</span><span>啟用</span><span /></div>
+            <div v-for="(u, i) in ruleDlg.form.Upstreams" :key="i" class="ups-row">
+              <el-input v-model="u.Host" placeholder="10.0.0.21" />
+              <el-input-number v-model="u.Port" :min="1" :max="65535" controls-position="right" />
+              <el-input-number v-model="u.Weight" :min="1" :max="100" controls-position="right" title="權重越大分到越多流量" />
+              <el-checkbox v-model="u.IsBackup" :disabled="ruleDlg.form.LbMethod === 'cookie'" title="主要後端都失效時才使用" />
+              <el-switch v-model="u.IsActive" size="small" title="停用 = 暫時下線維護" />
+              <el-button :icon="Delete" circle text size="small" :disabled="ruleDlg.form.Upstreams.length <= 1" title="移除" @click="ruleDlg.form.Upstreams.splice(i, 1)" />
+            </div>
+            <el-button :icon="Plus" size="small" @click="ruleDlg.form.Upstreams.push(blankUpstream())">新增後端主機</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item v-if="ruleDlg.form.Upstreams.length > 1 || ruleDlg.form.LbMethod !== 'round_robin'" label="分配方式">
+          <el-radio-group v-model="ruleDlg.form.LbMethod" @change="(v) => v === 'cookie' && ruleDlg.form.Upstreams.forEach((u) => (u.IsBackup = false))">
+            <el-radio-button v-for="(m, k) in LB_METHOD" :key="k" :value="k">{{ m.text }}</el-radio-button>
+          </el-radio-group>
+          <div class="form-hint">{{ LB_METHOD[ruleDlg.form.LbMethod].hint }}。單台失敗 3 次即暫停 10 秒，連線失敗或逾時自動改送下一台（不重送 POST）。</div>
+        </el-form-item>
+        <el-form-item v-if="ruleDlg.form.LbMethod === 'cookie'" label="Cookie 名稱" prop="LbCookieName">
+          <el-input v-model="ruleDlg.form.LbCookieName" placeholder="例：JSESSIONID、PHPSESSID" style="width: 260px" />
         </el-form-item>
         <el-form-item label="SSL 憑證" prop="CertificateId">
           <el-select v-model="ruleDlg.form.CertificateId" placeholder="選擇憑證" style="width: 100%">
@@ -898,6 +950,15 @@ onMounted(loadAll);
 .sel { width: 130px; }
 .range { max-width: 280px; }
 .pager { margin-top: 12px; justify-content: flex-end; flex-wrap: wrap; }
+.ups { display: grid; gap: 2px; }
+.ups-item { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.ups-item.off { color: #c0c4cc; text-decoration: line-through; }
+.ups-method { justify-self: start; margin-top: 2px; }
+.ups-edit { width: 100%; display: grid; gap: 6px; }
+.ups-head, .ups-row { display: grid; grid-template-columns: minmax(120px, 1fr) 110px 90px 40px 44px 32px; gap: 6px; align-items: center; }
+.ups-head { font-size: 12px; color: #909399; line-height: 1.4; }
+.ups-row .el-input-number { width: 100%; }
+.ups-edit > .el-button { justify-self: start; }
 .audit-detail { white-space: pre-line; font-size: 12.5px; line-height: 1.5; color: #4a5568; max-height: 9em; overflow: auto; }
 .cert-cell { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
@@ -922,6 +983,8 @@ onMounted(loadAll);
   .node-card { max-width: none; }
   .actions { width: 100%; justify-content: space-between; }
   .search, .search.wide, .sel, .range { width: 100%; max-width: none; }
+  .ups-head { display: none; }
+  .ups-row { grid-template-columns: 1fr 1fr; }
 }
 </style>
 
