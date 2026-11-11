@@ -18,6 +18,7 @@ keys/
 
 # 其他
 *.log
+logs/
 .DS_Store
 Thumbs.db
 .vscode/

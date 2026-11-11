@@ -9,6 +9,7 @@
 ├─ VERSION                      版號唯一來源（由 npm run release 維護）
 ├─ scripts/                     version.js 版號規則、release.js 發佈腳本
 ├─ .githooks/                   pre-commit（檢查 README）、pre-push（檢查版號 tag）
+├─ ecosystem.config.js          PM2 設定檔（單一執行個體，Log 輸出到 logs/）
 ├─ database/schema.sql          SQL Server DDL（7 張資料表，可重複執行並自動轉換舊資料）+ 兩台節點範例資料
 ├─ backend/                     Node.js + Express + Sequelize(mssql) + JWT
 │  ├─ public/                   前端編譯產物（frontend npm run build 自動輸出，不進版控）
@@ -49,6 +50,39 @@ npm start                            # 啟動後端：http://localhost:3000（�
 - 系統**只有後端一個 port**（`PORT`，預設 3000）：前端編譯結果放在 `backend/public`，由 Express 直接提供，不再使用 Vite 開發伺服器。
 - 修改前端時可在 `frontend` 執行 `npm run watch`，存檔即自動重新編譯到 `backend/public`，重新整理瀏覽器即可。
 - 控制層主機需安裝 openssl（PFX 轉檔用）。
+
+## 正式環境部署（Windows Server 2022 + PM2）
+
+**需要安裝**
+
+| 項目 | 用途 / 說明 |
+|---|---|
+| Node.js LTS（22 或 24，x64） | 執行後端；最低需求 18.17 |
+| PM2：`npm i -g pm2` | 常駐、異常自動重啟、Log |
+| pm2-installer 或 NSSM | `pm2 startup` 不支援 Windows，需用這類工具把 PM2 註冊成 Windows 服務，開機自動啟動 |
+| OpenSSL | 上傳 PFX 憑證時拆解用，`openssl` 必須在**系統** PATH（Win64 OpenSSL，或 Git for Windows 內附的 `C:\Program Files\Git\usr\bin`） |
+| pm2-logrotate（建議）：`pm2 install pm2-logrotate` | 自動切割 Log |
+
+不需要 Visual Studio Build Tools 或 Python（`ssh2` 的 `cpu-features` 為選用原生模組，編譯失敗不影響功能），也不需要 SQL Server 驅動程式（`tedious` 為純 JavaScript）。
+
+**啟動**
+
+```bash
+npm run install:all
+npm run build
+pm2 start ecosystem.config.js
+pm2 save          # 記住程序清單，服務重啟後自動還原
+```
+
+常用指令：`pm2 status`、`pm2 logs nginx-ha-proxy-manager`、`pm2 restart nginx-ha-proxy-manager`（修改 `.env` 或更新程式後執行）。Log 檔在專案的 `logs/out.log`、`logs/error.log`。
+
+**注意事項**
+
+- **只能跑 1 個執行個體**（`ecosystem.config.js` 已設定 fork 模式，請勿改成 cluster）：部署鎖、登入失敗鎖定、SSE 即時 Log、節點資源數據都存在記憶體。
+- **服務帳號權限**：以服務執行時（pm2-installer 預設 Local Service），`openssl` 要在系統 PATH；`SSH_KEY_PATH` 私鑰檔與 `backend\.env` 要讓服務帳號讀得到，並以 NTFS 權限限制只有系統管理員與服務帳號可讀（例如私鑰放 `C:\ProgramData\nginx-ha-manager\keys\`）。
+- **HTTPS**：建議以 IIS + URL Rewrite + ARR 套上憑證後轉給 `localhost:9050`（`TRUST_PROXY` 維持 `loopback`）；部署即時 Log 使用 SSE，需在 IIS 關閉回應緩衝（`responseBufferLimit="0"`），否則 Log 會在部署結束才一次出現。不使用 IIS 時，需在 Windows 防火牆開放 `PORT` 輸入連線。
+- **對外連線**：需能連到 SQL Server（1433）、兩台 Nginx 節點（SSH 22）與 SOAP 認證服務。
+- 連續啟動失敗 10 次（例如 `.env` 設定錯誤、資料庫連不上）PM2 會停止重啟，請用 `pm2 logs` 查看原因。
 
 ## 登入與權限（SOAP + JWT）
 
