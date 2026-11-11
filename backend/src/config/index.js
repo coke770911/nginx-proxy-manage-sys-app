@@ -48,6 +48,14 @@ module.exports = {
     timeoutMs: parseInt(process.env.SOAP_TIMEOUT_MS || '10000', 10),
     rejectUnauthorized: bool(process.env.SOAP_TLS_VERIFY, true),
   },
+  nginx: {
+    // 只接受 modern / legacy，其他值一律視為設定錯誤，避免默默產生錯誤語法
+    http2Syntax: (() => {
+      const v = (process.env.NGINX_HTTP2_SYNTAX || 'modern').trim().toLowerCase();
+      if (v !== 'modern' && v !== 'legacy') throw new Error(`.env 設定 NGINX_HTTP2_SYNTAX 只能是 modern 或 legacy：${v}`);
+      return v;
+    })(),
+  },
   healthIntervalSec: parseInt(process.env.HEALTH_INTERVAL_SEC || '60', 10),
   db: {
     host: process.env.DB_HOST || '127.0.0.1',

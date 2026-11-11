@@ -2,7 +2,7 @@
 
 目前版本：**v1.0.1**
 
-校園網域反向代理與 SSL 憑證集中管理系統（控制層）。管理員於網頁維護「網域 → 後端」規則與憑證，按下「一鍵同步部署」後，後端以 SSH/SFTP 平行推送到兩台 Ubuntu 24.04 Nginx，**兩台 `nginx -t` 都通過才 reload，任一失敗自動回滾**。
+校園網域反向代理與 SSL 憑證集中管理系統（控制層）。管理員於網頁維護「網域 → 後端」規則與憑證，按下「一鍵同步部署」後，後端以 SSH/SFTP 平行推送到兩台 Ubuntu（26.04 / 24.04）Nginx，**兩台 `nginx -t` 都通過才 reload，任一失敗自動回滾**。
 
 ```
 ├─ CLAUDE.md                    代理規則（版號、README、安全規範）
@@ -85,6 +85,14 @@ sudo chmod 750 /etc/nginx/ssl
 
 `deployer` 需能寫入上述兩個目錄（本系統不使用 sudo 寫檔），sudoers 僅需 `nginx -t` 與 `systemctl reload nginx`。主機金鑰指紋可填入 `ProxyNodes.HostKeySha256`（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 的 `SHA256:...`）以防中間人。
 
+### Ubuntu 26.04 注意事項
+
+- **HTTP/2 寫法**：26.04 的 nginx ≥ 1.25.1，`.env` 的 `NGINX_HTTP2_SYNTAX` 保持預設 `modern` 即可；若仍有 24.04 節點請改 `legacy`（兩台需同版本）。
+- **sudo-rs**：25.10 起預設 sudo 為 Rust 版 sudo-rs，設定好 sudoers 後請以 deployer 手動確認 `sudo -n /usr/sbin/nginx -t` 與 `sudo -n /usr/bin/systemctl reload nginx` 都不需密碼。
+- **Rust 版 coreutils**：部署與回滾使用 `tar`、`find -delete`，上線前請在測試機故意做一次失敗部署（例如自訂語法寫錯），確認回滾能完整還原。
+- **OpenSSH 10.x**：預設優先抗量子金鑰交換，本系統的 ssh2 會自動退回 curve25519，可正常連線；若 SSH 加固為「只允許抗量子金鑰交換」將無法連線。部署金鑰請使用 ed25519。
+- **OpenSSL 3.5**：RSA 1024 或 SHA-1 簽章等弱憑證會讓 `nginx -t` 失敗（系統會自動回滾）。
+
 ## 節點管理
 
 `schema.sql` 只建立兩筆範例節點（`192.168.10.11/12`），請登入後到「Nginx 節點」分頁（或點節點卡片上的編輯鈕）改成實際主機：
@@ -115,8 +123,9 @@ sudo chmod 750 /etc/nginx/ssl
 - **真實客戶端 IP**：F5 為 L4 Passthrough，Nginx 看到的 `$remote_addr` 為 F5 位址（若有 SNAT）。要取得真實 IP 需 F5 不做 SNAT，或改用 PROXY protocol（Nginx 加 `listen ... proxy_protocol` 與 `real_ip` 設定）。
 - **`/f5-health-check`** 設於每個網域的 80/443 server；F5 以 IP 探測時會落到第一個 server block，仍會回 200。
 - **認證**：SOAP 帳密驗證 + `ADMIN_ACCOUNTS` 白名單 + JWT，詳見上方「登入與權限」；正式環境請以 HTTPS 提供本系統，避免帳密與 Token 以明文傳輸。
-- 版本相容：Ubuntu 24.04 的 nginx 為 1.24，故使用 `listen 443 ssl http2;`；升級至 ≥1.25.1 後可改 `http2 on;`。
+- 版本相容：HTTP/2 寫法由 `.env` 的 `NGINX_HTTP2_SYNTAX` 決定。`modern`（預設）產生 `listen 443 ssl;` + `http2 on;`，適用 nginx ≥ 1.25.1（Ubuntu 26.04）；`legacy` 產生 `listen 443 ssl http2;`，適用 nginx 1.24（Ubuntu 24.04），在新版 nginx 上會出現過時警告。兩台節點請使用相同 Ubuntu 版本。
 - 自訂 Nginx 語法插入 443 server 區塊（位於 `location /` 之前），僅檢查大括號成對，語法正確性由 `nginx -t` 把關。
+- 憑證上傳對話框每次開啟都會重置檔案欄位（`destroy-on-close`），選取的 PEM / PFX 檔會正確帶入表單。
 
 ## 版號規則與發佈流程
 

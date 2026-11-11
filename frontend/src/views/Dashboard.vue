@@ -219,7 +219,7 @@ function openCert(row) {
   });
 }
 
-const pickFile = (field) => (e) => { certDlg[field] = e.target.files[0] || null; };
+const pickFile = (field, e) => { certDlg[field] = e.target.files[0] || null; };
 
 async function saveCert() {
   if (!certDlg.id && !certDlg.alias.trim()) return ElMessage.warning('請輸入憑證別名');
@@ -561,7 +561,7 @@ onMounted(loadAll);
     </el-dialog>
 
     <!-- 憑證上傳 -->
-    <el-dialog v-model="certDlg.visible" :title="certDlg.id ? '更新憑證（續約）' : '上傳 SSL 憑證'" width="560px" class="rwd-dialog">
+    <el-dialog v-model="certDlg.visible" :title="certDlg.id ? '更新憑證（續約）' : '上傳 SSL 憑證'" width="560px" class="rwd-dialog" destroy-on-close>
       <el-form label-width="110px">
         <el-form-item :label="certDlg.id ? '別名（可不改）' : '憑證別名'">
           <el-input v-model="certDlg.alias" placeholder="*.aeust.edu.tw 萬用字元憑證" />
@@ -573,11 +573,11 @@ onMounted(loadAll);
           </el-radio-group>
         </el-form-item>
         <template v-if="certDlg.mode === 'pem'">
-          <el-form-item label="憑證檔"><input type="file" accept=".crt,.pem,.cer" @change="pickFile('cert')"></el-form-item>
-          <el-form-item label="私鑰檔"><input type="file" accept=".key,.pem" @change="pickFile('key')"></el-form-item>
+          <el-form-item label="憑證檔"><input type="file" accept=".crt,.pem,.cer" @change="pickFile('cert', $event)"></el-form-item>
+          <el-form-item label="私鑰檔"><input type="file" accept=".key,.pem" @change="pickFile('key', $event)"></el-form-item>
         </template>
         <template v-else>
-          <el-form-item label="PFX 檔"><input type="file" accept=".pfx,.p12" @change="pickFile('pfx')"></el-form-item>
+          <el-form-item label="PFX 檔"><input type="file" accept=".pfx,.p12" @change="pickFile('pfx', $event)"></el-form-item>
           <el-form-item label="PFX 密碼"><el-input v-model="certDlg.pfxPassword" type="password" show-password autocomplete="new-password" /></el-form-item>
         </template>
         <el-alert type="info" :closable="false" show-icon

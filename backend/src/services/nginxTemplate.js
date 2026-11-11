@@ -4,7 +4,9 @@
  * 每條 DomainRule → 一個 /etc/nginx/sites-managed/<domain>.conf
  *
  * 所有會被插入設定檔的欄位都先經 validateRule() 白名單驗證，避免設定注入。
- * 目標環境：Ubuntu 24.04 內建 nginx 1.24（因此使用 `listen 443 ssl http2;` 寫法）。
+ * HTTP/2 寫法依 .env NGINX_HTTP2_SYNTAX：
+ *   modern（預設，nginx ≥ 1.25.1，如 Ubuntu 26.04）→ `listen 443 ssl;` + `http2 on;`
+ *   legacy（nginx < 1.25.1，如 Ubuntu 24.04 的 1.24）→ `listen 443 ssl http2;`
  */
 const config = require('../config');
 
@@ -144,7 +146,12 @@ function renderConf(rule) {
 
   // ---- Port 443 ----
   out.push('server {');
-  out.push('    listen 443 ssl http2;');
+  if (config.nginx.http2Syntax === 'legacy') {
+    out.push('    listen 443 ssl http2;');
+  } else {
+    out.push('    listen 443 ssl;');
+    out.push('    http2 on;');
+  }
   out.push(`    server_name ${domain};`);
   out.push('');
   out.push(`    ssl_certificate     ${crt};`);
