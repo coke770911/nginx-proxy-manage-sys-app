@@ -1,6 +1,6 @@
 # Nginx HA Proxy Manager
 
-目前版本：**v1.0.0**
+目前版本：**v1.0.1**
 
 校園網域反向代理與 SSL 憑證集中管理系統（控制層）。管理員於網頁維護「網域 → 後端」規則與憑證，按下「一鍵同步部署」後，後端以 SSH/SFTP 平行推送到兩台 Ubuntu 24.04 Nginx，**兩台 `nginx -t` 都通過才 reload，任一失敗自動回滾**。
 
@@ -133,6 +133,10 @@ npm run version:test             # 驗證版號進位規則
 第一次推送到 GitHub：先在 GitHub 建立空的 repository，再執行 `git remote add origin <網址>` 與 `npm run release`。
 
 ## 更新紀錄
+
+### v1.0.1（2026-11-11）
+
+- 新增：SOAP 登入 + 特權帳號白名單 + JWT 驗證、單一 port 部署、節點管理介面
 
 ### v1.0.0
 
