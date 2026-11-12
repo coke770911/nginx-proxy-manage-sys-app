@@ -5,7 +5,7 @@ description: 在 vSphere 上建置一台新的 Ubuntu Server 26.04 Nginx 節點�
 
 # 建置並接入 Nginx 節點
 
-完整人工操作版見 `docs/節點建置操作手冊.md`；本 skill 是 Claude 代為操作的流程。全程以繁體中文回報。
+完整人工操作版見 `docs/節點建置操作手冊.md`；本 skill 是 Claude 代為操作的流程。全程以繁體中文回報。已上線節點的稽核、更新、網段管理、連不上排查，改用 `nginx-node-ops`。
 
 ## 安全底線（每一步都適用）
 
@@ -62,6 +62,8 @@ description: 在 vSphere 上建置一台新的 Ubuntu Server 26.04 Nginx 節點�
 Test-NetConnection <IP> -Port 22
 ```
 
+**先確認 IP 沒被別台占用**：若連線時好時壞、或每個埠都「被拒」（新系統還沒開 ufw 時較難分辨），依 `nginx-node-ops` 第 7 節用 `arping -0` 比對回應的 MAC 是否等於這台 VM 的 MAC（vSphere VM 摘要可看）。
+
 `TcpTestSucceeded : True` 後請使用者自己 `ssh sysadmin@<IP>` 登入（需要密碼，不代打），若用了臨時密碼請他 `passwd`。
 
 ## 3. 部署金鑰
@@ -81,7 +83,7 @@ Test-NetConnection <IP> -Port 22
 
 讀取本 skill 目錄下的 `node-setup.sh`，把 `__PUBKEY__` 換成上一步的公鑰、`__SSH_ALLOW_NETS__` 換成第 0 步的 SSH 允許網段（空白分隔 CIDR；使用者說 `x.x.33.*` 就寫 `x.x.33.0/24`），組成下列貼上區塊交給使用者，在已登入的 SSH 視窗整段貼上（會要一次 sudo 密碼）。替換後的內容只在對話中提供，不寫回版控檔案。
 
-腳本除了初始化，也完成安全加固：ufw 的 SSH 只開放允許網段（先加網段規則再刪 `OpenSSH` 全開規則）、SSH 禁 root / 關 X11 / `MaxAuthTries 3` / `AllowUsers sysadmin deployer`、fail2ban（允許網段列白名單）、`server_tokens off`、自動安全更新、sysctl、停用 ModemManager/udisks2/upower。sysadmin 有 `authorized_keys` 時才關閉密碼登入。**既有節點重跑同一腳本即可補上加固**（可重複執行）。若 apt 出現紫色「Daemons using outdated libraries」對話框，請使用者按 Enter。
+腳本除了初始化，也完成安全加固：ufw 的 SSH 只開放允許網段（先加網段規則再刪 `OpenSSH` 全開規則）、SSH 禁 root / 關 X11 / `MaxAuthTries 3` / `AllowUsers sysadmin deployer`、fail2ban（允許網段列白名單）、`server_tokens off`、自動安全更新、sysctl、停用 ModemManager/udisks2/upower；另外以 ACL 讓 deployer 唯讀 `/var/log/nginx`（管理介面「檢視 Log」用），並設定 logrotate 每天切檔、保留 365 天。sysadmin 有 `authorized_keys` 時才關閉密碼登入。**既有節點重跑同一腳本即可補上加固**（可重複執行）。若 apt 出現紫色「Daemons using outdated libraries」對話框，請使用者按 Enter。
 
 ```bash
 cat > ~/node-setup.sh <<'EOF'
@@ -107,7 +109,15 @@ ssh -i C:/nginx-ha-manager/keys/deployer_ed25519 -o BatchMode=yes deployer@<IP> 
 curl -sI http://<IP>/ | grep -i '^server'
 ```
 
-預期：fail2ban `active`、`PermitRootLogin no` 等 5 行、ignoreip 含允許網段、`server_tokens off;`、`0`、回應標頭為 `Server: nginx`（不含版本）。deployer 讀不到 ufw 規則，請使用者核對腳本輸出的 `ufw status numbered`：22/tcp 只對允許網段 ALLOW，且已無 `OpenSSH ... Anywhere`。
+預期：fail2ban `active`、`PermitRootLogin no` 等 5 行、ignoreip 含允許網段、`server_tokens off;`、`0`、回應標頭為 `Server: nginx`（不含版本）。
+
+完整檢查可直接跑 `nginx-node-ops` 的唯讀稽核（含 Log ACL、logrotate、帳號、sysctl、網卡 MAC）：
+
+```bash
+tr -d '\r' < .claude/skills/nginx-node-ops/node-audit.sh | ssh -i C:/nginx-ha-manager/keys/deployer_ed25519 -o BatchMode=yes deployer@<IP> 'bash -s'
+```
+
+對照 `nginx-node-ops` 第 2 節的表格判讀；記下網卡 MAC，日後排查 IP 衝突用。deployer 讀不到 ufw 規則，請使用者核對腳本輸出的 `ufw status numbered`：22/tcp 只對允許網段 ALLOW，且已無 `OpenSSH ... Anywhere`。
 
 ## 6. 接入系統
 

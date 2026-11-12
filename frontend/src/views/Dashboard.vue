@@ -646,7 +646,56 @@ function closeDeploy() {
   return undefined;
 }
 
-onBeforeUnmount(() => { if (es) es.close(); if (backendTimer) clearInterval(backendTimer); });
+onBeforeUnmount(() => { if (es) es.close(); if (backendTimer) clearInterval(backendTimer); stopNodeLogTimer(); });
+
+/* ------------------------------------------------------------------ 節點 Nginx Log */
+const NODE_LOG_LINES = [100, 200, 500, 1000, 2000];
+const nodeLogDlg = reactive({
+  visible: false, node: null, type: 'access', lines: 200, q: '',
+  loading: false, data: null, error: '', hint: '', auto: false, newestFirst: true,
+});
+let nodeLogTimer = null;
+function stopNodeLogTimer() { if (nodeLogTimer) { clearInterval(nodeLogTimer); nodeLogTimer = null; } }
+function openNodeLog(node) {
+  Object.assign(nodeLogDlg, { visible: true, node, data: null, error: '', hint: '', auto: false });
+  loadNodeLog();
+}
+async function loadNodeLog() {
+  if (!nodeLogDlg.node || nodeLogDlg.loading) return;
+  nodeLogDlg.loading = true;
+  try {
+    const { type, lines, q } = nodeLogDlg;
+    nodeLogDlg.data = await api.get(`/nodes/${nodeLogDlg.node.Id}/logs`, { params: { type, lines, q: q.trim() || undefined } });
+    nodeLogDlg.error = '';
+    nodeLogDlg.hint = '';
+  } catch (e) {
+    nodeLogDlg.error = e.message;
+    nodeLogDlg.hint = e.data?.hint || '';
+    nodeLogDlg.auto = false;
+    stopNodeLogTimer();
+  } finally { nodeLogDlg.loading = false; }
+}
+function toggleNodeLogAuto(on) {
+  stopNodeLogTimer();
+  if (on) nodeLogTimer = setInterval(loadNodeLog, 5000);
+}
+/** 依內容標示顏色：access.log 看狀態碼，error.log 看等級 */
+function nodeLogClass(line) {
+  if (nodeLogDlg.type === 'error') {
+    if (/\[(emerg|alert|crit|error)\]/.test(line)) return 'error';
+    if (/\[warn\]/.test(line)) return 'warn';
+    return '';
+  }
+  const m = line.match(/" (\d{3}) /);
+  if (!m) return '';
+  if (m[1] >= '500') return 'error';
+  if (m[1] >= '400') return 'warn';
+  return '';
+}
+const nodeLogLines = computed(() => {
+  const l = nodeLogDlg.data?.lines || [];
+  return nodeLogDlg.newestFirst ? [...l].reverse() : l;
+});
 
 /* ------------------------------------------------------------------ 部署紀錄詳情 */
 const logDlg = reactive({ visible: false, data: null });
@@ -693,6 +742,7 @@ onMounted(() => {
             <div class="node-meta">最後同步：{{ fmt(n.LastSyncAt) }}</div>
           </div>
           <el-switch :model-value="n.IsActive" size="small" @change="(v) => toggleNode(n, v)" />
+          <el-button size="small" :icon="Document" circle text title="檢視 Nginx Log" @click="openNodeLog(n)" />
           <el-button size="small" :icon="Edit" circle text title="編輯節點" @click="openNode(n)" />
         </div>
         <template v-if="n.IsActive && n.Stats">
@@ -723,7 +773,11 @@ onMounted(() => {
         </div>
         <div class="toolbar search-bar">
           <el-input v-model="ruleQuery" :prefix-icon="Search" clearable placeholder="搜尋網域或後端 IP" class="search" />
-          <span v-if="ruleQuery" class="hint">找到 {{ filteredRules.length }} / {{ rules.length }} 筆</span>
+          <!-- 表格右上角：目前筆數（搜尋時顯示符合 / 全部） -->
+          <span class="row-count">
+            <template v-if="ruleQuery">找到 <b>{{ filteredRules.length }}</b> / {{ rules.length }} 筆</template>
+            <template v-else>共 <b>{{ rules.length }}</b> 筆</template>
+          </span>
         </div>
         <el-table :data="filteredRules" stripe border style="width: 100%" :empty-text="ruleQuery ? '查無符合的規則' : '尚無規則'">
           <el-table-column prop="DomainName" label="來源網域" min-width="200" fixed>
@@ -847,8 +901,9 @@ onMounted(() => {
           <el-table-column label="啟用" width="80" align="center">
             <template #default="{ row }"><el-switch :model-value="row.IsActive" size="small" @change="(v) => toggleNode(row, v)" /></template>
           </el-table-column>
-          <el-table-column label="操作" width="110" fixed="right" align="center">
+          <el-table-column label="操作" width="150" fixed="right" align="center">
             <template #default="{ row }">
+              <el-button size="small" :icon="Document" circle title="檢視 Nginx Log" @click="openNodeLog(row)" />
               <el-button size="small" :icon="Edit" circle title="編輯" @click="openNode(row)" />
               <el-button size="small" type="danger" :icon="Delete" circle title="刪除" @click="removeNode(row)" />
             </template>
@@ -1252,6 +1307,41 @@ onMounted(() => {
       </template>
     </el-dialog>
 
+    <!-- 節點 Nginx Log -->
+    <el-dialog v-model="nodeLogDlg.visible" :title="`Nginx Log：${nodeLogDlg.node?.NodeName || ''}`" width="1000px" top="4vh"
+               class="rwd-dialog" @closed="stopNodeLogTimer(); nodeLogDlg.auto = false">
+      <div class="toolbar nlog-bar">
+        <el-radio-group v-model="nodeLogDlg.type" size="small" @change="loadNodeLog">
+          <el-radio-button value="access">存取紀錄 access.log</el-radio-button>
+          <el-radio-button value="error">錯誤紀錄 error.log</el-radio-button>
+        </el-radio-group>
+        <el-select v-model="nodeLogDlg.lines" size="small" class="nlog-lines" @change="loadNodeLog">
+          <el-option v-for="n in NODE_LOG_LINES" :key="n" :label="`最後 ${n} 行`" :value="n" />
+        </el-select>
+        <el-input v-model="nodeLogDlg.q" size="small" clearable :prefix-icon="Search" placeholder="關鍵字（IP、網址、狀態碼…）"
+                  class="nlog-q" @keyup.enter="loadNodeLog" @clear="loadNodeLog" />
+        <el-button size="small" type="primary" :icon="Refresh" :loading="nodeLogDlg.loading" @click="loadNodeLog">重新讀取</el-button>
+        <el-checkbox v-model="nodeLogDlg.auto" size="small" @change="toggleNodeLogAuto">每 5 秒自動更新</el-checkbox>
+        <el-checkbox v-model="nodeLogDlg.newestFirst" size="small">最新的在最上面</el-checkbox>
+      </div>
+      <el-alert v-if="nodeLogDlg.error" type="error" :closable="false" show-icon :title="nodeLogDlg.error">
+        <pre v-if="nodeLogDlg.hint" class="nlog-hint">{{ nodeLogDlg.hint }}</pre>
+      </el-alert>
+      <template v-else-if="nodeLogDlg.data">
+        <div class="hint">
+          {{ nodeLogDlg.data.file }} ·
+          <template v-if="nodeLogDlg.data.keyword">在最後 {{ nodeLogDlg.data.scanned.toLocaleString() }} 行中找到含「{{ nodeLogDlg.data.keyword }}」的 {{ nodeLogDlg.data.lines.length }} 行（最多顯示 {{ nodeLogDlg.data.count }} 行）</template>
+          <template v-else>共 {{ nodeLogDlg.data.lines.length }} 行</template>
+          · 讀取時間 {{ fmt(nodeLogDlg.data.fetchedAt) }}
+        </div>
+        <div class="logbox nlog-box">
+          <div v-if="!nodeLogLines.length" class="logline">（沒有資料）</div>
+          <div v-for="(l, i) in nodeLogLines" :key="i" class="logline" :class="nodeLogClass(l)">{{ l }}</div>
+        </div>
+      </template>
+      <div v-else-if="nodeLogDlg.loading" class="hint">讀取中…</div>
+    </el-dialog>
+
     <!-- 部署紀錄詳情 -->
     <el-dialog v-model="logDlg.visible" :title="`部署紀錄 #${logDlg.data?.Id}`" width="820px" top="5vh" class="rwd-dialog">
       <template v-if="logDlg.data">
@@ -1304,6 +1394,14 @@ onMounted(() => {
 
 .toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
 .hint { color: #909399; font-size: 12px; }
+.nlog-bar { margin-bottom: 8px; }
+.nlog-lines { width: 120px; }
+.nlog-q { width: 240px; }
+.nlog-box { height: 60vh; }
+.nlog-hint { margin: 8px 0 0; white-space: pre-wrap; font-family: Consolas, 'Courier New', monospace; font-size: 12px; }
+@media (max-width: 768px) { .nlog-q, .nlog-lines { width: 100%; } }
+.row-count { margin-left: auto; color: #606266; font-size: 13px; white-space: nowrap; }
+.row-count b { color: var(--el-color-primary); font-weight: 600; }
 .search { width: 240px; }
 .search.wide { width: 320px; }
 .sel { width: 130px; }

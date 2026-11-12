@@ -62,6 +62,38 @@ visudo -cf /tmp/nginx-deployer
 install -m 440 -o root -g root /tmp/nginx-deployer /etc/sudoers.d/nginx-deployer
 rm -f /tmp/nginx-deployer
 
+echo "== 7b. 讓 deployer 唯讀 Nginx Log（管理介面「檢視 Log」用；只開 /var/log/nginx，不加入 adm 群組）=="
+command -v setfacl >/dev/null 2>&1 || apt-get install -y acl
+setfacl -m u:deployer:rx /var/log/nginx
+setfacl -d -m u:deployer:r /var/log/nginx   # logrotate 新建的檔案自動繼承
+setfacl -m u:deployer:r /var/log/nginx/*.log
+
+echo "== 7c. Nginx Log 保留一年（每天切檔、壓縮，超過 365 天自動刪除）=="
+cat > /etc/logrotate.d/nginx <<'ROTATE'
+/var/log/nginx/*.log {
+	daily
+	missingok
+	rotate 365
+	maxage 365
+	dateext
+	dateformat -%Y%m%d
+	compress
+	delaycompress
+	notifempty
+	create 0640 www-data adm
+	sharedscripts
+	prerotate
+		if [ -d /etc/logrotate.d/httpd-prerotate ]; then \
+			run-parts /etc/logrotate.d/httpd-prerotate; \
+		fi \
+	endscript
+	postrotate
+		invoke-rc.d nginx rotate >/dev/null 2>&1
+	endscript
+}
+ROTATE
+logrotate -d /etc/logrotate.d/nginx >/dev/null 2>&1 || { echo "!! logrotate 設定檢查失敗"; exit 1; }
+
 echo "== 8. SSH 加固 =="
 cat > /etc/ssh/sshd_config.d/10-hardening.conf <<'EOF'
 PermitRootLogin no

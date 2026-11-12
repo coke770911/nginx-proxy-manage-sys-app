@@ -59,10 +59,11 @@
 │        ├─ accountService.js   可登入名單（資料庫帳號 + .env 特權帳號）
 │        ├─ auditService.js     系統操作紀錄寫入（不含密碼 / 私鑰）
 │        ├─ certService.js      憑證解析 / 公私鑰比對 / PFX 轉檔
-│        ├─ nginxTemplate.js    .conf 生成器（upstream 負載平衡、欄位白名單驗證）
+│        ├─ nginxTemplate.js    .conf 生成器（upstream 負載平衡、欄位白名單驗證、503 維護頁、502 / 504 / 404 柴犬頁）
 │        ├─ sshSession.js       SSH+SFTP 連線封裝（可驗證主機金鑰）
 │        ├─ deployService.js    雙機兩階段部署與回滾引擎
 │        ├─ backendProbe.js     從節點測試後端連線（TCP + HTTP 狀態碼）
+│        ├─ nodeLogService.js   讀取節點 Nginx access / error Log（唯讀、白名單）
 │        ├─ ruleImport.js       網域規則 CSV 匯入解析、格式檢查、重複比對與匯出
 │        └─ healthService.js    節點燈號（SSH + nginx active）與 CPU / RAM / 硬碟使用率
 └─ frontend/                    Vue 3 + Vite + Element Plus（views/Login.vue、views/Dashboard.vue）
@@ -181,7 +182,7 @@ pm2 save          # 記住程序清單，服務重啟後自動還原
 
 ## 網域規則搜尋
 
-「網域對照規則」分頁上方的搜尋框可用**來源網域**或**任一台後端的 IP / Port** 即時過濾（例如 `portal`、`10.0.0.21`、`:8080`），並顯示符合筆數。搜尋框獨立一列，位於「新增規則 / 匯入 / 匯出」按鈕下方。
+「網域對照規則」分頁上方的搜尋框可用**來源網域**或**任一台後端的 IP / Port** 即時過濾（例如 `portal`、`10.0.0.21`、`:8080`）。搜尋框獨立一列，位於「新增規則 / 匯入 / 匯出」按鈕下方；同一列的表格右上角顯示目前筆數（「共 N 筆」，搜尋時為「找到 x / y 筆」）。
 
 清單右側有「建立日期」與「最後更動」兩欄（可點標題排序）；只修改後端主機時「最後更動」也會更新。
 
@@ -282,9 +283,27 @@ Nginx 部署時只檢查設定語法（`nginx -t`），**不會**檢查後端是
 規則開啟「維護中頁面」後，該網域所有請求會回 **HTTP 503** 與一張內嵌的維護頁面（附 `Retry-After: 3600`，告知搜尋引擎稍後再來）：
 
 - 原創 SVG 插圖「戴安全帽的土撥鼠挖地板」，含 CSS 動畫（使用者系統設定「減少動態」時自動停止），並支援深色模式與手機版面。
-- 整頁 HTML 約 5.5 KB 直接寫在 Nginx 設定中，不需要額外的圖檔或外部資源。
+- 整頁 HTML 約 5.5 KB 直接寫在 Nginx 設定中，不需要額外的圖檔或外部資源。Nginx 單一參數上限 4096 bytes，因此頁面會切成每段最多 3000 bytes 的變數（`set $page_part0 ...`），再以 `return 503 "$page_part0$page_part1"` 組合回傳；502 / 504 / 404 頁面同樣處理。
 - 因為放在 Nginx 單引號字串裡，產生設定時會再檢查一次，確保不含單引號、`$`、反斜線或換行。
 - `/f5-health-check` 在維護中仍回 200，F5 不會把節點判定為故障。
+
+## 後端連不上頁面（502 / 504）
+
+後端沒開、Port 沒在監聽、防火牆擋住或回應逾時時，Nginx 不再顯示預設的白底錯誤頁，改回一張內嵌的柴犬頁面（放大鏡當作「502」「504」中間的 0），並顯示網域：
+
+- **502 Bad Gateway**：連不上後端（拒絕連線、主機不通）。**504 Gateway Timeout**：後端逾時沒有回應。狀態碼維持不變，F5 與監控工具仍能正確判斷。
+- 只攔 Nginx 自己產生的錯誤；後端程式自己回的 404 / 500 等頁面照常顯示（未開啟 `proxy_intercept_errors`）。
+- 多台後端時，會先依負載平衡自動改送其他台，全部失敗才出現此頁。
+- 維護中的規則不轉發後端，仍顯示 503 維護頁面。
+
+## 預設站台（404 頁面）
+
+直接以節點 IP（例如 `https://<節點IP>/`）或沒有設定規則的網域連線時，以前會落到第一個網域規則，被轉給不相干的後端（例如出現 IIS 的「HTTP Error 404」）。現在每次部署都會一併產生 `sites-managed/_default_server.conf`：
+
+- `listen 80 default_server` 與 `listen 443 ssl default_server`，回 **HTTP 404** 與一張內嵌頁面：原創 SVG「柴犬拿著放大鏡」，放大鏡就是「404」中間的 0，支援深色模式與手機版面。
+- 443 借用目前已部署、到期日最晚的憑證；以 IP 連線本來就會出現「憑證名稱不符」警告，略過後即可看到頁面。沒有任何啟用規則時只產生 80。
+- `/f5-health-check` 在預設站台同樣回 200，F5 以 IP 探測不受影響。
+- 檔名以底線開頭，不可能和網域規則的設定檔同名；節點上若另有 `default_server`（例如未刪除的 `sites-enabled/default`），`nginx -t` 會失敗並自動回滾。
 
 ## Ubuntu 節點事前準備（兩台皆需）
 
@@ -308,6 +327,24 @@ sudo chmod 750 /etc/nginx/ssl
 - **fail2ban**：防 SSH 暴力破解，允許網段列入白名單。
 - **其他**：`server_tokens off`（回應標頭不顯示 Nginx 版本）、自動安全更新、sysctl 網路參數、停用不需要的服務。
 
+### 節點日常維運（Claude 技能）
+
+- `.claude/skills/deploy-nginx-node/`：建置新節點並接入系統（安裝 OS、初始化與加固腳本、登錄節點、健康檢查）。
+- `.claude/skills/nginx-node-ops/`：既有節點維運，包含：
+  - 健康檢查。
+  - 唯讀安全稽核：`node-audit.sh` 以 deployer 身分執行，不需 root，附預期值對照表。
+  - 重新加固。
+  - Ubuntu 更新與輪流重開機。
+  - SSH 允許網段與 fail2ban 管理。
+  - Nginx Log 權限。
+  - 節點連不上或時好時壞的排查：以 `arping -0` 確認 IP 衝突，並在 vCenter 以 MAC 欄位篩選找出衝突的 VM，只查詢、不修改 VM。
+
+手動執行稽核：
+
+```bash
+tr -d '\r' < .claude/skills/nginx-node-ops/node-audit.sh | ssh -i <私鑰> -o BatchMode=yes deployer@<節點IP> 'bash -s'
+```
+
 ### Ubuntu 26.04 注意事項
 
 - **HTTP/2 寫法**：26.04 的 nginx ≥ 1.25.1，`.env` 的 `NGINX_HTTP2_SYNTAX` 保持預設 `modern` 即可；若仍有 24.04 節點請改 `legacy`（兩台需同版本）。
@@ -329,6 +366,39 @@ sudo chmod 750 /etc/nginx/ssl
 
 可新增、編輯、刪除節點；刪除節點不會清除該主機上已部署的設定。儲存後按節點列右側的「重新檢測」確認燈號。
 
+## 檢視節點 Nginx Log
+
+節點卡片或「Nginx 節點」分頁的文件圖示按鈕可開啟 **Nginx Log** 視窗，透過 SSH 即時讀取該節點的 Log（唯讀）：
+
+- **存取紀錄** `access.log` / **錯誤紀錄** `error.log`，可選最後 100 / 200 / 500 / 1000 / 2000 行。
+- **關鍵字搜尋**：從最後 50,000 行中找含關鍵字的行（不分大小寫、固定字串比對，例如 IP、網址、` 502 `）。
+- 可勾選每 5 秒自動更新、最新的在最上面；access.log 的 4xx 以黃色、5xx 以紅色標示，error.log 依等級（warn / error）標示。
+- 只能讀白名單中的兩個檔案（目錄由 `.env` 的 `REMOTE_LOG_DIR` 設定，預設 `/var/log/nginx`）；關鍵字以單引號包起來交給 `grep -F`，並禁止控制字元，避免指令注入。單次最多回傳 2 MB。
+
+**節點權限（每台執行一次）**：Ubuntu 的 Nginx Log 屬於 `www-data:adm`、權限 640，`deployer` 預設讀不到（視窗會顯示以下指令）。不建議把 `deployer` 加入 `adm` 群組（可讀 `auth.log` 等所有系統 Log），改用 ACL 只開放 `/var/log/nginx`，並設預設 ACL 讓 logrotate 新建的檔案自動繼承。以 sysadmin 登入節點執行：
+
+```bash
+sudo apt-get install -y acl          # Ubuntu Server 預設沒有 setfacl
+sudo setfacl -m u:deployer:rx /var/log/nginx
+sudo setfacl -d -m u:deployer:r /var/log/nginx
+sudo setfacl -m u:deployer:r /var/log/nginx/*.log
+```
+
+新建節點時，`.claude/skills/deploy-nginx-node/node-setup.sh` 已包含這一步。
+
+### Log 保留期限（一年）
+
+Ubuntu 預設只保留 14 天。節點改為由 logrotate **保留一年**：每天切一份新檔、隔天壓縮（gzip，約剩一成），檔名附日期（例 `access.log-20261112.gz`），超過 365 天自動刪除（`rotate 365` + `maxage 365`）。新檔案會繼承上面的 ACL，管理介面仍可讀取。
+
+- 管理介面的「檢視 Log」只讀目前的 `access.log` / `error.log`（當天）；較舊的紀錄需登入節點以 `zcat` / `zgrep` 查詢。
+- 以目前流量估算一年僅數 MB；即使流量放大百倍也只約數 GB，節點硬碟（144 GB）足夠。
+- 新建節點時，`node-setup.sh` 的步驟 7c 會寫入此設定；既有節點以 sysadmin 執行一次：
+
+```bash
+sudo sed -i -e 's/^\(\s*\)rotate 14$/\1rotate 365\n\1maxage 365\n\1dateext\n\1dateformat -%Y%m%d/' /etc/logrotate.d/nginx
+sudo logrotate -d /etc/logrotate.d/nginx 2>&1 | grep -iE "error|rotating pattern"
+```
+
 ## 部署流程對照
 
 | 階段 | 動作 | 失敗時 |
@@ -344,7 +414,7 @@ sudo chmod 750 /etc/nginx/ssl
 
 - **私鑰存放**：`KeyPem` 以明文存於 SQL Server，請限制 DB 存取，並建議啟用 TDE / 欄位加密；備份檔 `/tmp/nginx_backup.tar.gz` 含私鑰，權限為 600。
 - **真實客戶端 IP**：F5 為 L4 Passthrough，Nginx 看到的 `$remote_addr` 為 F5 位址（若有 SNAT）。要取得真實 IP 需 F5 不做 SNAT，或改用 PROXY protocol（Nginx 加 `listen ... proxy_protocol` 與 `real_ip` 設定）。
-- **`/f5-health-check`** 設於每個網域的 80/443 server；F5 以 IP 探測時會落到第一個 server block，仍會回 200。
+- **`/f5-health-check`** 設於每個網域與預設站台的 80/443 server；F5 以 IP 探測時會落到預設站台，仍會回 200。
 - **認證**：SOAP 帳密驗證 + 可登入名單（帳號管理 + `ADMIN_ACCOUNTS`）+ JWT，詳見上方「登入與權限」；正式環境請以 HTTPS 提供本系統，避免帳密與 Token 以明文傳輸。
 - 版本相容：HTTP/2 寫法由 `.env` 的 `NGINX_HTTP2_SYNTAX` 決定。`modern`（預設）產生 `listen 443 ssl;` + `http2 on;`，適用 nginx ≥ 1.25.1（Ubuntu 26.04）；`legacy` 產生 `listen 443 ssl http2;`，適用 nginx 1.24（Ubuntu 24.04），在新版 nginx 上會出現過時警告。兩台節點請使用相同 Ubuntu 版本。
 - 自訂 Nginx 語法插入 443 server 區塊（位於 `location /` 之前），僅檢查大括號成對，語法正確性由 `nginx -t` 把關。

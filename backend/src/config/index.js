@@ -73,6 +73,7 @@ module.exports = {
     confDir: (process.env.REMOTE_CONF_DIR || '/etc/nginx/sites-managed').replace(/\/+$/, ''),
     sslDir: (process.env.REMOTE_SSL_DIR || '/etc/nginx/ssl').replace(/\/+$/, ''),
     backupPath: process.env.REMOTE_BACKUP_PATH || '/tmp/nginx_backup.tar.gz',
+    logDir: (process.env.REMOTE_LOG_DIR || '/var/log/nginx').replace(/\/+$/, ''),
     testCmd: process.env.NGINX_TEST_CMD || 'sudo /usr/sbin/nginx -t',
     reloadCmd: process.env.NGINX_RELOAD_CMD || 'sudo /usr/bin/systemctl reload nginx',
   },

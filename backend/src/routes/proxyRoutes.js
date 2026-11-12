@@ -12,6 +12,7 @@ const healthService = require('../services/healthService');
 const { fetchHostFingerprint } = require('../services/sshSession');
 const backendProbe = require('../services/backendProbe');
 const ruleImport = require('../services/ruleImport');
+const nodeLog = require('../services/nodeLogService');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 3 } });
@@ -66,6 +67,23 @@ router.get('/nodes', wrap(async (req, res) => {
 
 /** 後端連線狀態（隨節點健康檢查定期更新，只讀記憶體，不會即時去測） */
 router.get('/backend-status', (req, res) => res.json(healthService.getBackendStatus()));
+
+/**
+ * 讀取節點 Nginx Log（唯讀）
+ * query: type=access|error、lines=100|200|500|1000|2000、q=關鍵字（不分大小寫的固定字串）
+ */
+router.get('/nodes/:id/logs', wrap(async (req, res) => {
+  const node = await ProxyNode.findByPk(req.params.id);
+  if (!node) throw new HttpError(404, '節點不存在');
+  try {
+    const r = await nodeLog.readNodeLog(node, { type: req.query.type, lines: req.query.lines, q: req.query.q });
+    res.json({ node: nodeName(node), ...r });
+  } catch (e) {
+    if (e instanceof nodeLog.LogError) return res.status(e.status).json({ message: e.message, hint: e.hint || null });
+    throw e;
+  }
+  return undefined;
+}));
 
 router.post('/nodes/check', wrap(async (req, res) => {
   res.json(await healthService.checkAllNodes());

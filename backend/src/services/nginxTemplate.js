@@ -175,6 +175,105 @@ const maintenanceHtml = (domain) => [
   '</main></body></html>',
 ].join('');
 
+/* ------------------------------------------------------------------ 柴犬錯誤頁（404 預設站台、後端連不上） */
+// 原創 SVG：柴犬拿著放大鏡，放大鏡當作三位數狀態碼中間的數字（例：4 [放大鏡] 4、5 [放大鏡] 2）
+const shibaSvg = (left, right, label) => [
+  `<svg class="art" viewBox="0 0 360 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${label}">`,
+  '<ellipse cx="180" cy="224" rx="130" ry="10" fill="#ead9c2"/>',
+  `<text x="78" y="128" font-size="112" font-weight="800" fill="#f0b34e" text-anchor="middle" font-family="Arial,sans-serif">${left}</text>`,
+  `<text x="282" y="128" font-size="112" font-weight="800" fill="#f0b34e" text-anchor="middle" font-family="Arial,sans-serif">${right}</text>`,
+  '<g class="lens">',
+  '<line x1="207" y1="98" x2="230" y2="128" stroke="#6b4a2f" stroke-width="12" stroke-linecap="round"/>',
+  '<circle cx="180" cy="70" r="38" fill="#e3f3fb" stroke="#6b4a2f" stroke-width="9"/>',
+  '<path d="M160 56A24 24 0 0 1 178 46" stroke="#fff" stroke-width="6" fill="none" stroke-linecap="round"/>',
+  '</g>',
+  '<g class="dog">',
+  '<ellipse cx="180" cy="206" rx="42" ry="22" fill="#e39a52"/>',
+  '<ellipse cx="180" cy="210" rx="22" ry="14" fill="#fff1dc"/>',
+  '<path d="M206 196C222 176 228 150 230 132" stroke="#e39a52" stroke-width="14" fill="none" stroke-linecap="round"/>',
+  '<circle cx="230" cy="130" r="9" fill="#fff1dc"/>',
+  '<path d="M150 146L148 112L172 132Z" fill="#e39a52"/><path d="M210 146L212 112L188 132Z" fill="#e39a52"/>',
+  '<path d="M154 140L153 120L166 132Z" fill="#f7c9a8"/><path d="M206 140L207 120L194 132Z" fill="#f7c9a8"/>',
+  '<circle cx="180" cy="160" r="33" fill="#e39a52"/>',
+  '<path d="M152 168C156 186 168 193 180 193C192 193 204 186 208 168C200 174 190 172 180 172C170 172 160 174 152 168Z" fill="#fff1dc"/>',
+  '<ellipse cx="168" cy="158" rx="4.5" ry="5" fill="#3b2a1e"/><ellipse cx="192" cy="158" rx="4.5" ry="5" fill="#3b2a1e"/>',
+  '<circle cx="169.5" cy="156" r="1.6" fill="#fff"/><circle cx="193.5" cy="156" r="1.6" fill="#fff"/>',
+  '<path d="M162 150L171 146M198 150L189 146" stroke="#8a5a32" stroke-width="2.5" stroke-linecap="round"/>',
+  '<ellipse cx="180" cy="171" rx="5" ry="3.6" fill="#3b2a1e"/>',
+  '<path d="M174 179Q180 175 186 179" stroke="#3b2a1e" stroke-width="2" fill="none" stroke-linecap="round"/>',
+  '<circle cx="158" cy="174" r="5" fill="#f59a9a" opacity=".55"/><circle cx="202" cy="174" r="5" fill="#f59a9a" opacity=".55"/>',
+  '</g>',
+  '<text class="q q1" x="120" y="150" font-size="26" font-weight="700" fill="#b08a68" font-family="Arial,sans-serif">?</text>',
+  '<text class="q q2" x="106" y="186" font-size="18" font-weight="700" fill="#c9ab8e" font-family="Arial,sans-serif">?</text>',
+  '</svg>',
+].join('');
+
+const NOTFOUND_CSS = MAINT_CSS + [
+  '.lens{transform-box:fill-box;transform-origin:70% 90%;animation:sweep 2.6s ease-in-out infinite}',
+  '@keyframes sweep{0%,100%{transform:rotate(-6deg)}50%{transform:rotate(6deg)}}',
+  '.dog{transform-box:fill-box;transform-origin:50% 100%;animation:tilt 2.6s ease-in-out infinite}',
+  '@keyframes tilt{0%,100%{transform:rotate(-2deg)}50%{transform:rotate(2deg)}}',
+  '.q{animation:bob 1.8s ease-in-out infinite}.q2{animation-delay:.6s}',
+  '.code{font-family:ui-monospace,Consolas,monospace;color:#c98a2e;font-weight:700;letter-spacing:.08em}',
+  '@media (prefers-reduced-motion:reduce){.lens,.dog,.q{animation:none}}',
+].join('');
+
+/** 柴犬錯誤頁共用外框；所有文字皆為程式內固定字串或已驗證的網域 */
+const shibaPage = ({ code, title, sub, codeText, msg, en, domain }) => [
+  '<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8">',
+  '<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">',
+  `<title>${code} ${title}${domain ? ` - ${domain}` : ''}</title><style>${NOTFOUND_CSS}</style></head><body><main>`,
+  shibaSvg(code[0], code[2], `柴犬拿著放大鏡：${title}`),
+  `<h1>${title}</h1>`,
+  `<p class="sub">${sub}</p>`,
+  ...(domain ? [`<div class="domain">${domain}</div>`] : []),
+  `<div class="code">${codeText}</div>`,
+  `<p>${msg}</p>`,
+  `<p class="en">${en}</p>`,
+  '</main></body></html>',
+].join('');
+
+/** 404：直接以 IP 或未設定的網域連線（預設站台） */
+const notFoundHtml = () => shibaPage({
+  code: '404', title: '找不到這個網頁',
+  sub: '柴犬拿著放大鏡找遍了每個角落，還是沒找到…',
+  codeText: 'HTTP 404 · Page Not Found',
+  msg: '請確認網址是否正確，或使用正式網域名稱連線。',
+  en: 'The page you requested was not found on this server.',
+});
+
+/** 502 / 504：Nginx 連不上後端（後端沒開、Port 沒在監聽、防火牆擋住或逾時） */
+const backendDownHtml = (domain, code) => shibaPage({
+  code, domain, title: '暫時找不到服務',
+  sub: '柴犬拿著放大鏡找了半天，後端伺服器沒有回應…',
+  codeText: code === '504' ? 'HTTP 504 · Gateway Timeout' : 'HTTP 502 · Bad Gateway',
+  msg: '網站服務暫時無法連線，請稍後再試；若持續發生，請聯絡網站管理者。',
+  en: 'The service is temporarily unavailable. Please try again later.',
+});
+
+/**
+ * 產生回傳整頁 HTML 的 nginx 指令。
+ * nginx 單一參數上限 4096 bytes（超過會出現 "too long parameter"），頁面約 5 KB，
+ * 所以切成每段 ≤ 3000 bytes 存進變數，再以 return <code> "$p0$p1..." 組合；變數內容不會再被 nginx 解析。
+ * 同一請求只會進入一個 location，不同 location 共用變數名稱不會互相影響。
+ */
+const PAGE_CHUNK_BYTES = 3000;
+function returnHtml(code, html) {
+  const safe = safeNginxString(html);
+  const chunks = [];
+  let cur = '';
+  for (const ch of safe) { // 以字元為單位切，不會切斷 UTF-8 中文字
+    if (Buffer.byteLength(cur + ch) > PAGE_CHUNK_BYTES) { chunks.push(cur); cur = ''; }
+    cur += ch;
+  }
+  if (cur) chunks.push(cur);
+  if (chunks.length === 1) return [`return ${code} '${chunks[0]}';`];
+  return [
+    ...chunks.map((c, i) => `set $page_part${i} '${c}';`),
+    `return ${code} "${chunks.map((_, i) => `$page_part${i}`).join('')}";`,
+  ];
+}
+
 /** 放進 nginx 單引號字串前的最後防線：不可含 ' $ \ 或換行 */
 function safeNginxString(s) {
   if (/['$\\\r\n]/.test(s)) throw new Error('維護頁面 HTML 含有 nginx 字串不允許的字元（單引號、$、反斜線或換行）');
@@ -228,7 +327,19 @@ function renderConf(rule) {
     `    proxy_connect_timeout ${multi ? '5s' : '10s'};`,
     '    proxy_send_timeout 300s;',
     `    proxy_read_timeout ${ws ? '3600s' : '300s'};`,
+    // 只攔 Nginx 自己產生的 502 / 504（連不上後端或逾時）；後端自己回的錯誤頁不攔（未開 proxy_intercept_errors）
+    '    error_page 502 @backend_502;',
+    '    error_page 504 @backend_504;',
     '}',
+    '',
+    ...['502', '504'].flatMap((code) => [
+      `location @backend_${code} {`,
+      '    default_type text/html;',
+      '    charset utf-8;',
+      '    add_header Cache-Control "no-store" always;',
+      ...returnHtml(code, backendDownHtml(domain, code)).map((l) => `    ${l}`),
+      '}',
+    ]),
   ].join('\n');
 
   const maintenanceLocation = [
@@ -237,7 +348,7 @@ function renderConf(rule) {
     '    charset utf-8;',
     '    add_header Retry-After 3600 always;',
     '    add_header Cache-Control "no-store" always;',
-    `    return 503 '${safeNginxString(maintenanceHtml(domain))}';`,
+    ...returnHtml('503', maintenanceHtml(domain)).map((l) => `    ${l}`),
     '}',
   ].join('\n');
 
@@ -323,4 +434,66 @@ function renderConf(rule) {
   return out.join('\n');
 }
 
-module.exports = { validateRule, renderConf, confFileName, certRemotePaths, upstreamsOf, LB_METHODS };
+/**
+ * 預設站台（default_server）：以 IP 或未設定的網域連線時回 404 可愛頁面，
+ * 避免落到第一個網域規則而被轉給不相干的後端。/f5-health-check 仍回 200，F5 以 IP 探測不受影響。
+ * 檔名以底線開頭，網域規則（需符合 DOMAIN_RE）不可能產生相同檔名。
+ * @param {number|null} certId 443 用的憑證（沒有任何規則時為 null，只建立 80）
+ */
+const DEFAULT_CONF_NAME = '_default_server.conf';
+function renderDefaultConf(certId) {
+  const page = [
+    '    location = /f5-health-check {',
+    '        access_log off;',
+    '        default_type text/plain;',
+    '        return 200 "OK\\n";',
+    '    }',
+    '',
+    '    location / {',
+    '        default_type text/html;',
+    '        charset utf-8;',
+    '        add_header Cache-Control "no-store" always;',
+    ...returnHtml('404', notFoundHtml()).map((l) => `        ${l}`),
+    '    }',
+  ];
+  const out = [
+    '# =====================================================================',
+    '# Managed by Nginx HA Proxy Manager — 請勿手動修改，下次部署會被覆寫',
+    '# 預設站台：直接以 IP 或未設定的網域連線時回 404 頁面',
+    '# =====================================================================',
+    '',
+    'server {',
+    '    listen 80 default_server;',
+    '    server_name _;',
+    '',
+    ...page,
+    '}',
+  ];
+  if (certId) {
+    const { crt, key } = certRemotePaths(Number(certId));
+    out.push('');
+    out.push('server {');
+    if (config.nginx.http2Syntax === 'legacy') {
+      out.push('    listen 443 ssl http2 default_server;');
+    } else {
+      out.push('    listen 443 ssl default_server;');
+      out.push('    http2 on;');
+    }
+    out.push('    server_name _;');
+    out.push('');
+    out.push(`    ssl_certificate     ${crt};`);
+    out.push(`    ssl_certificate_key ${key};`);
+    out.push('    ssl_protocols TLSv1.2 TLSv1.3;');
+    out.push('    ssl_prefer_server_ciphers off;');
+    out.push('    ssl_session_cache shared:SSL:10m;');
+    out.push('    ssl_session_timeout 1d;');
+    out.push('    ssl_session_tickets off;');
+    out.push('');
+    page.forEach((l) => out.push(l));
+    out.push('}');
+  }
+  out.push('');
+  return out.join('\n');
+}
+
+module.exports = { validateRule, renderConf, renderDefaultConf, DEFAULT_CONF_NAME, confFileName, certRemotePaths, upstreamsOf, LB_METHODS };

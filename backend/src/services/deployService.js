@@ -15,7 +15,7 @@ const EventEmitter = require('events');
 const config = require('../config');
 const { ProxyNode, DomainRule, RuleUpstream, SslCertificate, DeployLog } = require('../models');
 const { NodeSession } = require('./sshSession');
-const { validateRule, renderConf, confFileName, certRemotePaths, upstreamsOf } = require('./nginxTemplate');
+const { validateRule, renderConf, renderDefaultConf, DEFAULT_CONF_NAME, confFileName, certRemotePaths, upstreamsOf } = require('./nginxTemplate');
 const backendProbe = require('./backendProbe');
 
 const bus = new EventEmitter();
@@ -88,6 +88,7 @@ async function buildFileSet(log) {
   const certs = new Map(); // certId → { crt, key }
   const problems = [];
   const backends = new Map(); // host:port → { host, port, domains[] }（維護中的規則不轉發，不需檢查）
+  let defaultCert = null; // 預設站台 443 使用的憑證
   for (const r of rules) {
     const p = r.get({ plain: true });
     const errs = validateRule(p);
@@ -106,9 +107,13 @@ async function buildFileSet(log) {
       });
     }
     certs.set(p.certificate.Id, { crt: p.certificate.CertPem, key: p.certificate.KeyPem });
+    if (!defaultCert || new Date(p.certificate.ValidTo) > new Date(defaultCert.ValidTo)) defaultCert = p.certificate;
   }
   if (problems.length) throw new DeployError('部分規則驗證失敗，已中止部署（未變更任何節點）', { detail: problems.join('\n') });
-  if (!confs.size) log('warn', '目前沒有任何啟用的規則，部署後遠端 sites-managed 將被清空');
+  if (!confs.size) log('warn', '目前沒有任何啟用的規則，部署後遠端只保留預設站台（404 頁面）');
+  // 預設站台的 443 借用一張已部署、到期日最晚的憑證（以 IP 連線本來就會出現憑證名稱不符的警告）
+  if (defaultCert) log('info', `預設站台（404 頁面）使用憑證「${defaultCert.Alias}」`);
+  confs.set(DEFAULT_CONF_NAME, renderDefaultConf(defaultCert ? defaultCert.Id : null));
   log('info', `已產生 ${confs.size} 個設定檔、${certs.size} 張憑證`);
   return { confs, certs, backends, ruleCount: rules.length };
 }
