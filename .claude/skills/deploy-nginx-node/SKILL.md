@@ -1,6 +1,6 @@
 ---
 name: deploy-nginx-node
-description: 在 vSphere 上建置一台新的 Ubuntu Server 26.04 Nginx 節點並接入 Nginx HA Proxy Manager（安裝 OS、固定 IP、執行節點初始化腳本、金鑰驗證、登錄節點、健康檢查）。使用者說「建新節點」「部署伺服器」「架第二台 nginx」「把 VM 接進系統」時使用。
+description: 在 vSphere 上建置一台新的 Ubuntu Server 26.04 Nginx 節點並接入 Nginx HA Proxy Manager（安裝 OS、固定 IP、執行節點初始化與安全加固腳本、金鑰驗證、登錄節點、健康檢查）。使用者說「建新節點」「部署伺服器」「架第二台 nginx」「把 VM 接進系統」「節點加固」時使用。
 ---
 
 # 建置並接入 Nginx 節點
@@ -25,6 +25,7 @@ description: 在 vSphere 上建置一台新的 Ubuntu Server 26.04 Nginx 節點�
 | 節點名稱（系統內） | `nginx-node2` |
 | 固定 IP / 遮罩 | `x.x.x.92 / 255.255.255.192` → 換算成 CIDR 與網段（/26 的網段 = IP 所在 64 區塊起點） |
 | Gateway、DNS | |
+| SSH 允許網段 | 管理人員與管理主機所在網段，例 `x.x.33.0/24 x.x.34.0/24`。**必須包含管理主機 IP**（PowerShell `Get-NetIPAddress -AddressFamily IPv4` 查），否則部署會連不上 |
 
 ## 1. 用 Claude in Chrome 操作 vSphere Web Console
 
@@ -78,7 +79,9 @@ Test-NetConnection <IP> -Port 22
 
 ## 4. 節點初始化腳本
 
-讀取本 skill 目錄下的 `node-setup.sh`，把 `__PUBKEY__` 換成上一步的公鑰，組成下列貼上區塊交給使用者，在已登入的 SSH 視窗整段貼上（會要一次 sudo 密碼）：
+讀取本 skill 目錄下的 `node-setup.sh`，把 `__PUBKEY__` 換成上一步的公鑰、`__SSH_ALLOW_NETS__` 換成第 0 步的 SSH 允許網段（空白分隔 CIDR；使用者說 `x.x.33.*` 就寫 `x.x.33.0/24`），組成下列貼上區塊交給使用者，在已登入的 SSH 視窗整段貼上（會要一次 sudo 密碼）。替換後的內容只在對話中提供，不寫回版控檔案。
+
+腳本除了初始化，也完成安全加固：ufw 的 SSH 只開放允許網段（先加網段規則再刪 `OpenSSH` 全開規則）、SSH 禁 root / 關 X11 / `MaxAuthTries 3` / `AllowUsers sysadmin deployer`、fail2ban（允許網段列白名單）、`server_tokens off`、自動安全更新、sysctl、停用 ModemManager/udisks2/upower。sysadmin 有 `authorized_keys` 時才關閉密碼登入。**既有節點重跑同一腳本即可補上加固**（可重複執行）。若 apt 出現紫色「Daemons using outdated libraries」對話框，請使用者按 Enter。
 
 ```bash
 cat > ~/node-setup.sh <<'EOF'
@@ -96,6 +99,15 @@ ssh -i C:\nginx-ha-manager\keys\deployer_ed25519 -o BatchMode=yes -o StrictHostK
 ```
 
 必須同時成立：`syntax is ok`、`RELOAD_OK`、`active`、兩個目錄擁有者為 deployer（ssl 為 `drwxr-x---`）、**指紋與 console 記下的完全一致**（不一致立即停止並告知使用者）。nginx ≥ 1.25.1 時 `.env` 的 `NGINX_HTTP2_SYNTAX` 應為 `modern`，否則提醒改 `legacy`。
+
+再確認加固結果：
+
+```bash
+ssh -i C:/nginx-ha-manager/keys/deployer_ed25519 -o BatchMode=yes deployer@<IP> "systemctl is-active fail2ban; cat /etc/ssh/sshd_config.d/10-hardening.conf; grep ignoreip /etc/fail2ban/jail.d/sshd.local; grep -n server_tokens /etc/nginx/nginx.conf; sysctl -n net.ipv4.conf.all.send_redirects"
+curl -sI http://<IP>/ | grep -i '^server'
+```
+
+預期：fail2ban `active`、`PermitRootLogin no` 等 5 行、ignoreip 含允許網段、`server_tokens off;`、`0`、回應標頭為 `Server: nginx`（不含版本）。deployer 讀不到 ufw 規則，請使用者核對腳本輸出的 `ufw status numbered`：22/tcp 只對允許網段 ALLOW，且已無 `OpenSSH ... Anywhere`。
 
 ## 6. 接入系統
 
@@ -127,7 +139,9 @@ ssh -i C:\nginx-ha-manager\keys\deployer_ed25519 -o BatchMode=yes -o StrictHostK
 
 告訴使用者：
 
-- 節點 IP、Nginx 版本、指紋已比對一致、健康檢查結果。
+- 節點 IP、Nginx 版本、指紋已比對一致、健康檢查結果、加固項目驗證結果。
+- 若 sysadmin 仍是密碼登入，說明目前由網段限制 + fail2ban 防護；設好 sysadmin 金鑰後重跑腳本即會關閉密碼登入。
+- 允許網段以外（家中、其他 VPN 網段）將無法 SSH，只能走 vSphere console；需要時在 ufw 加網段或重跑腳本。
 - 待辦：在 vSphere 取消 CD/DVD 的 Connected；上線前做一次故意寫錯自訂語法的部署確認會回滾；建立 VM 快照。
 - 真實 IP / 指紋只在對話中回報，不寫進進版控的檔案。
 

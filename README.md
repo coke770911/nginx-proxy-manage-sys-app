@@ -281,6 +281,15 @@ sudo chmod 750 /etc/nginx/ssl
 
 `deployer` 需能寫入上述兩個目錄（本系統不使用 sudo 寫檔），sudoers 僅需 `nginx -t` 與 `systemctl reload nginx`。主機金鑰指紋可填入 `ProxyNodes.HostKeySha256`（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 的 `SHA256:...`）以防中間人。
 
+### 節點初始化與安全加固腳本
+
+完整步驟見 [`docs/節點建置操作手冊.md`](docs/節點建置操作手冊.md)；腳本 `.claude/skills/deploy-nginx-node/node-setup.sh` 一次完成上述初始化與以下加固，可重複執行（既有節點重跑即可補上加固）：
+
+- **防火牆**：ufw 的 SSH（22）只開放 `SSH_ALLOW_NETS` 指定網段，**必須包含本管理主機所在網段**，否則無法部署。
+- **SSH**：禁止 root 登入、關閉 X11、`MaxAuthTries 3`、`AllowUsers sysadmin deployer`；sysadmin 已設定金鑰時才關閉密碼登入。
+- **fail2ban**：防 SSH 暴力破解，允許網段列入白名單。
+- **其他**：`server_tokens off`（回應標頭不顯示 Nginx 版本）、自動安全更新、sysctl 網路參數、停用不需要的服務。
+
 ### Ubuntu 26.04 注意事項
 
 - **HTTP/2 寫法**：26.04 的 nginx ≥ 1.25.1，`.env` 的 `NGINX_HTTP2_SYNTAX` 保持預設 `modern` 即可；若仍有 24.04 節點請改 `legacy`（兩台需同版本）。
