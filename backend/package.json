@@ -1,6 +1,6 @@
 {
   "name": "nginx-ha-proxy-manager-backend",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "校園網域反向代理與 SSL 憑證集中管理系統 - 後端 (Control Plane)",
   "main": "src/app.js",
   "private": true,
