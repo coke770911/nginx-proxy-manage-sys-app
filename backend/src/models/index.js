@@ -41,7 +41,7 @@ const DomainRule = sequelize.define('DomainRule', {
   CertificateId: { type: DataTypes.INTEGER, allowNull: false },
   ForceHttps: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
   EnableWebSocket: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
-  ClientMaxBodySize: { type: DataTypes.STRING(16), allowNull: false, defaultValue: '50M' },
+  ClientMaxBodySize: { type: DataTypes.STRING(16), allowNull: false, defaultValue: '2M' },
   IsActive: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
   IsMaintenance: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   CustomNginxSnippet: { type: DataTypes.TEXT },

@@ -265,7 +265,7 @@ router.get('/rules', wrap(async (req, res) => {
 }));
 
 router.post('/rules', wrap(async (req, res) => {
-  const data = normalizeRule({ ClientMaxBodySize: '50M', LbMethod: 'round_robin', ...pick(req.body, RULE_FIELDS) });
+  const data = normalizeRule({ ClientMaxBodySize: '2M', LbMethod: 'round_robin', ...pick(req.body, RULE_FIELDS) });
   const ups = normalizeUpstreams(req.body || {});
   if (!ups) throw new HttpError(400, '至少要設定一台後端主機');
   await checkRule({ ...data, Upstreams: ups });

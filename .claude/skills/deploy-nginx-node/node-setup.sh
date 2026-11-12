@@ -3,16 +3,22 @@
 # 使用前替換：
 #   __PUBKEY__         → 管理主機 deployer_ed25519.pub 的內容
 #   __SSH_ALLOW_NETS__ → 允許連 SSH 的網段（空白分隔 CIDR，須包含管理主機所在網段）
+#   __PROXY_PROTOCOL_FROM__ → 選填：F5 送出連線的來源 IP（空白分隔），開放 PROXY protocol 埠 8080/8443；不用 F5 就保留原樣
 # 可重複執行；既有節點重跑即可補上加固設定。
 set -euo pipefail
 
 PUBKEY='__PUBKEY__'
 SSH_ALLOW_NETS='__SSH_ALLOW_NETS__'
+PROXY_PROTOCOL_FROM='__PROXY_PROTOCOL_FROM__'
 export DEBIAN_FRONTEND=noninteractive
 
 case "$PUBKEY" in ssh-ed25519\ *) ;; *) echo "!! PUBKEY 尚未替換"; exit 1;; esac
 for n in $SSH_ALLOW_NETS; do
   [[ "$n" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] || { echo "!! SSH_ALLOW_NETS 格式錯誤：$n（應為 x.x.x.x/nn）"; exit 1; }
+done
+[ "$PROXY_PROTOCOL_FROM" = '__PROXY_PROTOCOL_FROM__' ] && PROXY_PROTOCOL_FROM=''
+for n in $PROXY_PROTOCOL_FROM; do
+  [[ "$n" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]] || { echo "!! PROXY_PROTOCOL_FROM 格式錯誤：$n（應為 x.x.x.x 或 x.x.x.x/nn）"; exit 1; }
 done
 
 echo "== 1. 時區 =="
@@ -27,6 +33,9 @@ echo "== 3. 防火牆（80/443 對外，SSH 只開放指定網段）=="
 ufw allow 80,443/tcp
 for n in $SSH_ALLOW_NETS; do
   ufw allow from "$n" to any port 22 proto tcp comment "SSH $n"
+done
+for n in $PROXY_PROTOCOL_FROM; do
+  ufw allow from "$n" to any port 8080,8443 proto tcp comment "PROXY protocol $n"
 done
 ufw delete allow OpenSSH >/dev/null 2>&1 || true   # 先加網段規則再刪全開規則，不會斷線
 ufw --force enable

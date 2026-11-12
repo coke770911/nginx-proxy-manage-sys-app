@@ -280,6 +280,33 @@ function safeNginxString(s) {
   return s;
 }
 
+/**
+ * PROXY protocol（.env PROXY_PROTOCOL_FROM 有值才啟用）：
+ * 另外監聽 httpPort / httpsPort 並帶 proxy_protocol，F5 pool 指到這兩個 port；原本 80 / 443 不變（直連與 F5 健康檢查照舊）。
+ * real_ip 只信任 PROXY_PROTOCOL_FROM（config 已驗證為 IPv4 / CIDR），$remote_addr 會還原成真實客戶端 IP，
+ * 送給後端的 X-Real-IP / X-Forwarded-For 與 access log 都隨之正確。沒帶 PROXY 標頭的連線不受影響。
+ */
+const pp = () => config.nginx.proxyProtocol;
+function ppHttpListen(defaultServer = false) {
+  if (!pp().enabled) return [];
+  return [`    listen ${pp().httpPort}${defaultServer ? ' default_server' : ''} proxy_protocol;`];
+}
+function ppHttpsListen(defaultServer = false) {
+  if (!pp().enabled) return [];
+  const ds = defaultServer ? ' default_server' : '';
+  return [config.nginx.http2Syntax === 'legacy'
+    ? `    listen ${pp().httpsPort} ssl http2${ds} proxy_protocol;`
+    : `    listen ${pp().httpsPort} ssl${ds} proxy_protocol;`];
+}
+function ppRealIp() {
+  if (!pp().enabled) return [];
+  return [
+    ...pp().from.map((ip) => `    set_real_ip_from ${ip};`),
+    '    real_ip_header proxy_protocol;',
+    '    port_in_redirect off;',
+  ];
+}
+
 function renderConf(rule) {
   const errs = validateRule(rule);
   if (errs.length) throw new Error(`規則 ${rule.DomainName || '?'} 驗證失敗：${errs.join('；')}`);
@@ -383,7 +410,9 @@ function renderConf(rule) {
   // ---- Port 80 ----
   out.push('server {');
   out.push('    listen 80;');
+  ppHttpListen().forEach((l) => out.push(l));
   out.push(`    server_name ${domain};`);
+  ppRealIp().forEach((l) => out.push(l));
   out.push('');
   out.push(indent(healthLocation));
   out.push('');
@@ -407,7 +436,9 @@ function renderConf(rule) {
     out.push('    listen 443 ssl;');
     out.push('    http2 on;');
   }
+  ppHttpsListen().forEach((l) => out.push(l));
   out.push(`    server_name ${domain};`);
+  ppRealIp().forEach((l) => out.push(l));
   out.push('');
   out.push(`    ssl_certificate     ${crt};`);
   out.push(`    ssl_certificate_key ${key};`);
@@ -464,7 +495,9 @@ function renderDefaultConf(certId) {
     '',
     'server {',
     '    listen 80 default_server;',
+    ...ppHttpListen(true),
     '    server_name _;',
+    ...ppRealIp(),
     '',
     ...page,
     '}',
@@ -479,7 +512,9 @@ function renderDefaultConf(certId) {
       out.push('    listen 443 ssl default_server;');
       out.push('    http2 on;');
     }
+    ppHttpsListen(true).forEach((l) => out.push(l));
     out.push('    server_name _;');
+    ppRealIp().forEach((l) => out.push(l));
     out.push('');
     out.push(`    ssl_certificate     ${crt};`);
     out.push(`    ssl_certificate_key ${key};`);

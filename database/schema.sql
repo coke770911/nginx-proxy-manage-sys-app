@@ -71,7 +71,7 @@ CREATE TABLE dbo.DomainRules (
     CertificateId      INT               NOT NULL,
     ForceHttps         BIT               NOT NULL CONSTRAINT DF_DomainRules_ForceHttps DEFAULT (1),
     EnableWebSocket    BIT               NOT NULL CONSTRAINT DF_DomainRules_WebSocket DEFAULT (0),
-    ClientMaxBodySize  NVARCHAR(16)      NOT NULL CONSTRAINT DF_DomainRules_BodySize DEFAULT (N'50M'),
+    ClientMaxBodySize  NVARCHAR(16)      NOT NULL CONSTRAINT DF_DomainRules_BodySize DEFAULT (N'2M'),
     IsActive           BIT               NOT NULL CONSTRAINT DF_DomainRules_IsActive DEFAULT (1),
     IsMaintenance      BIT               NOT NULL CONSTRAINT DF_DomainRules_IsMaint DEFAULT (0),
     CustomNginxSnippet NVARCHAR(MAX)     NULL,                           -- 自訂 Nginx 語法（插入 443 server 區塊）

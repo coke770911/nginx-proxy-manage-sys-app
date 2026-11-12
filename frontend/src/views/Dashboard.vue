@@ -55,6 +55,20 @@ const fmt = (d) => {
   if (Number.isNaN(t.getTime())) return String(d);
   return `${t.getFullYear()}/${pad2(t.getMonth() + 1)}/${pad2(t.getDate())} ${pad2(t.getHours())}:${pad2(t.getMinutes())}:${pad2(t.getSeconds())}`;
 };
+/** 距今幾天沒變動（以當地日曆日計算，今天更動＝0） */
+const idleDays = (d) => {
+  const t = new Date(d);
+  if (!d || Number.isNaN(t.getTime())) return null;
+  const today = new Date();
+  const a = Date.UTC(t.getFullYear(), t.getMonth(), t.getDate());
+  const b = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+  return Math.max(0, Math.round((b - a) / 86400000));
+};
+const idleText = (d) => {
+  const n = idleDays(d);
+  if (n === null) return '';
+  return n === 0 ? '今天有更動' : `${n} 天沒變動`;
+};
 /** 規則網址：有綁憑證走 https，否則 http */
 const siteUrl = (r) => `${r.CertificateId ? 'https' : 'http'}://${r.DomainName}/`;
 /** 舊部署紀錄每行開頭是 UTC ISO 時間，轉成當地時間顯示 */
@@ -314,7 +328,7 @@ async function removeNode(row) {
 const blankUpstream = () => ({ Host: '', Port: 80, Weight: 1, IsBackup: false, IsActive: true });
 const blankRule = () => ({
   DomainName: '', CertificateId: null,
-  ForceHttps: true, EnableWebSocket: false, ClientMaxBodySize: '50M',
+  ForceHttps: true, EnableWebSocket: false, ClientMaxBodySize: '2M',
   IsActive: true, IsMaintenance: false, CustomNginxSnippet: '', Remark: '',
   LbMethod: 'round_robin', LbCookieName: '', Upstreams: [blankUpstream()],
 });
@@ -830,7 +844,10 @@ onMounted(() => {
             <template #default="{ row }"><span class="date-cell">{{ fmt(row.CreatedAt) }}</span></template>
           </el-table-column>
           <el-table-column prop="UpdatedAt" label="最後更動" width="170" align="center" sortable>
-            <template #default="{ row }"><span class="date-cell">{{ fmt(row.UpdatedAt) }}</span></template>
+            <template #default="{ row }">
+              <span class="date-cell">{{ fmt(row.UpdatedAt) }}</span>
+              <div class="idle-days" :class="{ long: idleDays(row.UpdatedAt) >= 180 }">{{ idleText(row.UpdatedAt) }}</div>
+            </template>
           </el-table-column>
           <el-table-column label="操作" width="220" fixed="right" align="center">
             <template #default="{ row }">
@@ -1203,7 +1220,7 @@ onMounted(() => {
           <el-checkbox v-model="ruleDlg.form.IsActive">啟用</el-checkbox>
           <el-checkbox v-model="ruleDlg.form.IsMaintenance">系統維護中頁面</el-checkbox>
         </el-form-item>
-        <el-form-item label="上傳檔案上限"><el-input v-model="ruleDlg.form.ClientMaxBodySize" placeholder="50M" style="width: 160px" /></el-form-item>
+        <el-form-item label="上傳檔案上限"><el-input v-model="ruleDlg.form.ClientMaxBodySize" placeholder="2M" style="width: 160px" /></el-form-item>
         <el-form-item label="自訂 Nginx 語法">
           <el-input v-model="ruleDlg.form.CustomNginxSnippet" type="textarea" :rows="5" class="mono"
                     placeholder="插入 443 server 區塊，例如：&#10;proxy_buffering off;&#10;add_header X-Frame-Options SAMEORIGIN;" />
@@ -1373,6 +1390,8 @@ onMounted(() => {
 .domain-link { color: var(--el-color-primary); text-decoration: none; word-break: break-all; }
 .domain-link:hover { text-decoration: underline; }
 .date-cell { font-size: 12px; color: #606266; white-space: nowrap; }
+.idle-days { font-size: 12px; color: #909399; white-space: nowrap; }
+.idle-days.long { color: #e6a23c; }
 .node-tools { display: flex; align-items: center; gap: 12px; flex: none; }
 .node-tools .el-button + .el-button { margin-left: 0; }
 .node-row { display: flex; align-items: center; gap: 12px; }

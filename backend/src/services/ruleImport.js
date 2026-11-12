@@ -205,7 +205,7 @@ function analyze(rows, existing, certs) {
       CertificateId: cert ? cert.Id : null,
       ForceHttps: pickv('ForceHttps', true),
       EnableWebSocket: pickv('EnableWebSocket', false),
-      ClientMaxBodySize: pickv('ClientMaxBodySize', '50M'),
+      ClientMaxBodySize: pickv('ClientMaxBodySize', '2M'),
       IsActive: pickv('IsActive', true),
       IsMaintenance: pickv('IsMaintenance', false),
       Remark: pickv('Remark', null),

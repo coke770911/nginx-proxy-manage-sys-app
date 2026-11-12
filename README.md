@@ -184,7 +184,7 @@ pm2 save          # 記住程序清單，服務重啟後自動還原
 
 「網域對照規則」分頁上方的搜尋框可用**來源網域**或**任一台後端的 IP / Port** 即時過濾（例如 `portal`、`10.0.0.21`、`:8080`）。搜尋框獨立一列，位於「新增規則 / 匯入 / 匯出」按鈕下方；同一列的表格右上角顯示目前筆數（「共 N 筆」，搜尋時為「找到 x / y 筆」）。
 
-清單右側有「建立日期」與「最後更動」兩欄（可點標題排序）；只修改後端主機時「最後更動」也會更新。
+清單右側有「建立日期」與「最後更動」兩欄（可點標題排序）；只修改後端主機時「最後更動」也會更新。「最後更動」下方會顯示距今「N 天沒變動」（以日曆日計算，當天修改顯示「今天有更動」），超過 180 天以橘色標示，方便找出久未維護的規則。
 
 清單中的來源網域為超連結，點擊會另開視窗開啟該網站（有綁憑證用 https，否則 http；萬用字元網域 `*.xxx` 僅顯示文字）。
 
@@ -201,7 +201,7 @@ pm2 save          # 記住程序清單，服務重啟後自動還原
 | 分配方式 | 輪流 / 最少連線 / 依Cookie固定（需填 Cookie名稱）；空白＝輪流 |
 | SSL憑證 | 憑證別名或編號；空白會自動挑選涵蓋該網域、到期日最晚的憑證 |
 | 強制HTTPS、WebSocket、啟用、維護中 | 是 / 否 |
-| 上傳上限 | 例 `50M` |
+| 上傳上限 | 例 `50M`；空白＝預設 `2M`（新增規則時表單預設也是 `2M`，已存在的規則不受影響） |
 | 備註 | 任意文字 |
 
 **匯入流程**：選擇檔案 → 系統逐列檢查格式並與現有規則比對 → 預覽 → 確認後才寫入資料庫。
@@ -304,6 +304,31 @@ Nginx 部署時只檢查設定語法（`nginx -t`），**不會**檢查後端是
 - 443 借用目前已部署、到期日最晚的憑證；以 IP 連線本來就會出現「憑證名稱不符」警告，略過後即可看到頁面。沒有任何啟用規則時只產生 80。
 - `/f5-health-check` 在預設站台同樣回 200，F5 以 IP 探測不受影響。
 - 檔名以底線開頭，不可能和網域規則的設定檔同名；節點上若另有 `default_server`（例如未刪除的 `sites-enabled/default`），`nginx -t` 會失敗並自動回滾。
+
+## 真實客戶端 IP（PROXY protocol，前方有 F5 時）
+
+F5 做 SNAT 時，Nginx 看到的來源都是 F5 的位址，轉給後端的 `X-Real-IP` / `X-Forwarded-For` 和 access log 也都會是 F5。設定 `backend/.env` 的 `PROXY_PROTOCOL_FROM` 後重新部署即可還原：
+
+| 設定 | 說明 |
+|---|---|
+| `PROXY_PROTOCOL_FROM` | F5 送出連線的來源 IP（Self IP / SNAT 位址），空白或逗號分隔，可用 CIDR；**留空 = 停用**，產生的設定與先前完全相同 |
+| `PROXY_PROTOCOL_HTTP_PORT` / `PROXY_PROTOCOL_HTTPS_PORT` | 帶 PROXY protocol 的監聽埠，預設 `8080` / `8443`，不可為 80 / 443 |
+
+啟用後每個網域與預設站台的 server 會多出：
+
+```nginx
+listen 8080 proxy_protocol;          # 80 那個 server
+listen 8443 ssl proxy_protocol;      # 443 那個 server（SSL 仍在 Nginx 卸載）
+set_real_ip_from <PROXY_PROTOCOL_FROM>;
+real_ip_header proxy_protocol;
+port_in_redirect off;                # 轉址不帶出 8080 / 8443
+```
+
+- 原本的 80 / 443 不變：直接連節點、F5 的 `/f5-health-check` 監控照舊。只有從 `PROXY_PROTOCOL_FROM` 送來的 PROXY 標頭才會被採信。
+- **節點防火牆**：8080 / 8443 只開給 F5，每台節點執行 `sudo ufw allow from <F5 IP> to any port 8080,8443 proto tcp`；新節點可在初始化腳本填 `__PROXY_PROTOCOL_FROM__` 自動加入。
+- **F5 端**（另外設定）：pool 成員改指 `節點:8080` / `節點:8443`，virtual server 加上送出 PROXY v1 標頭的 iRule；健康檢查仍可打 80。
+- **順序**：先部署（節點開始監聽 8080 / 8443）並開防火牆，再改 F5 pool；回退時反過來，F5 pool 改回 80 / 443 後再清空 `PROXY_PROTOCOL_FROM`。
+- **後端系統**仍需設定「信任節點 IP、改讀 `X-Real-IP`」，例如 Apache `mod_remoteip`、Tomcat `RemoteIpValve`、IIS 記錄欄位加 `X-Real-IP`，才會在自己的 log / 程式中看到真實 IP。
 
 ## Ubuntu 節點事前準備（兩台皆需）
 
@@ -413,7 +438,7 @@ sudo logrotate -d /etc/logrotate.d/nginx 2>&1 | grep -iE "error|rotating pattern
 ## 注意事項
 
 - **私鑰存放**：`KeyPem` 以明文存於 SQL Server，請限制 DB 存取，並建議啟用 TDE / 欄位加密；備份檔 `/tmp/nginx_backup.tar.gz` 含私鑰，權限為 600。
-- **真實客戶端 IP**：F5 為 L4 Passthrough，Nginx 看到的 `$remote_addr` 為 F5 位址（若有 SNAT）。要取得真實 IP 需 F5 不做 SNAT，或改用 PROXY protocol（Nginx 加 `listen ... proxy_protocol` 與 `real_ip` 設定）。
+- **真實客戶端 IP**：F5 為 L4 Passthrough，有 SNAT 時 Nginx 看到的 `$remote_addr` 為 F5 位址；設定 `PROXY_PROTOCOL_FROM` 即可改用 PROXY protocol 還原，詳見上方「真實客戶端 IP（PROXY protocol）」。
 - **`/f5-health-check`** 設於每個網域與預設站台的 80/443 server；F5 以 IP 探測時會落到預設站台，仍會回 200。
 - **認證**：SOAP 帳密驗證 + 可登入名單（帳號管理 + `ADMIN_ACCOUNTS`）+ JWT，詳見上方「登入與權限」；正式環境請以 HTTPS 提供本系統，避免帳密與 Token 以明文傳輸。
 - 版本相容：HTTP/2 寫法由 `.env` 的 `NGINX_HTTP2_SYNTAX` 決定。`modern`（預設）產生 `listen 443 ssl;` + `http2 on;`，適用 nginx ≥ 1.25.1（Ubuntu 26.04）；`legacy` 產生 `listen 443 ssl http2;`，適用 nginx 1.24（Ubuntu 24.04），在新版 nginx 上會出現過時警告。兩台節點請使用相同 Ubuntu 版本。

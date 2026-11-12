@@ -55,6 +55,26 @@ module.exports = {
       if (v !== 'modern' && v !== 'legacy') throw new Error(`.env 設定 NGINX_HTTP2_SYNTAX 只能是 modern 或 legacy：${v}`);
       return v;
     })(),
+    // PROXY protocol（前方 F5 做 SNAT 時還原真實客戶端 IP）：PROXY_PROTOCOL_FROM 留空 = 停用
+    // 啟用後每個 server 另外監聽 httpPort / httpsPort（帶 proxy_protocol），且只信任 from 清單送來的 PROXY 標頭
+    proxyProtocol: (() => {
+      const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}(\/([0-9]|[12]\d|3[0-2]))?$/;
+      const from = (process.env.PROXY_PROTOCOL_FROM || '').split(/[\s,]+/).filter(Boolean);
+      from.forEach((ip) => {
+        if (!IPV4.test(ip)) throw new Error(`.env 設定 PROXY_PROTOCOL_FROM 格式錯誤：${ip}（應為 IPv4 或 x.x.x.x/nn）`);
+      });
+      const port = (key, d) => {
+        const p = Number(process.env[key] || d);
+        if (!Number.isInteger(p) || p < 1 || p > 65535 || p === 80 || p === 443) {
+          throw new Error(`.env 設定 ${key} 必須為 1–65535 且不可為 80 / 443：${process.env[key]}`);
+        }
+        return p;
+      };
+      const httpPort = port('PROXY_PROTOCOL_HTTP_PORT', 8080);
+      const httpsPort = port('PROXY_PROTOCOL_HTTPS_PORT', 8443);
+      if (httpPort === httpsPort) throw new Error('.env 設定 PROXY_PROTOCOL_HTTP_PORT 與 PROXY_PROTOCOL_HTTPS_PORT 不可相同');
+      return { enabled: from.length > 0, from, httpPort, httpsPort };
+    })(),
   },
   healthIntervalSec: parseInt(process.env.HEALTH_INTERVAL_SEC || '60', 10),
   db: {
