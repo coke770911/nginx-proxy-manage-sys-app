@@ -24,7 +24,27 @@ async function loadAll() {
   } finally {
     loading.value = false;
   }
+  loadBackendStatus();
 }
+
+/* ------------------------------------------------------------------ 後端連線燈號 */
+// 由後端隨節點健康檢查（HEALTH_INTERVAL_SEC）從各節點測 TCP；前端只讀結果，不會即時去測
+const backendSt = ref({ checkedAt: null, intervalSec: 60, backends: {} });
+async function loadBackendStatus() {
+  try { backendSt.value = await api.get('/backend-status'); } catch { /* 燈號為輔助資訊，失敗不打擾使用者 */ }
+}
+/** 燈號文字沿用下方「從節點測試後端連線」的 PROBE_TEXT；回傳 { cls: green|yellow|red|grey|off, tip } */
+function backendLight(u) {
+  if (!u.IsActive) return { cls: 'off', tip: '此後端已停用，不檢測' };
+  const list = backendSt.value.backends[`${String(u.Host).toLowerCase()}:${u.Port}`] || [];
+  if (!list.length) return { cls: 'grey', tip: '尚未檢測（每次節點健康檢查時更新）' };
+  const ok = list.filter((r) => r.status === 'OK').length;
+  const cls = ok === list.length ? 'green' : ok ? 'yellow' : 'red';
+  const lines = list.map((r) => `${r.nodeName}：${PROBE_TEXT[r.status] || r.status}${r.status === 'OK' && r.ms != null ? `（${r.ms} ms）` : ''}`);
+  const at = list.map((r) => r.at).sort().pop();
+  return { cls, tip: `${lines.join('\n')}\n檢測時間：${fmt(at)}` };
+}
+let backendTimer = null;
 
 /* ------------------------------------------------------------------ 共用工具 */
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -56,7 +76,7 @@ const HEALTH_TEXT = { ONLINE: '連線正常', DEGRADED: 'SSH 正常 / Nginx 異�
 const usageColor = (p) => (p >= 90 ? '#f56c6c' : p >= 70 ? '#e6a23c' : '#67c23a');
 const gb = (b) => (b >= 1024 ** 4 ? `${(b / 1024 ** 4).toFixed(1)} TB` : `${(b / 1024 ** 3).toFixed(1)} GB`);
 const resRows = (st) => [
-  st.cpu !== null && st.cpu !== undefined && { label: 'CPU', p: st.cpu, text: `${st.cpu}%`, tip: `${st.cores || '?'} 核心，負載 ${(st.load || []).join(' / ')}（1 / 5 / 15 分鐘）` },
+  st.cpu !== null && st.cpu !== undefined && { label: 'CPU', p: st.cpu, text: st.cores ? `${st.cpu}% · ${st.cores} 核` : `${st.cpu}%`, tip: `${st.cores || '?'} 核心，負載 ${(st.load || []).join(' / ')}（1 / 5 / 15 分鐘）` },
   st.mem && { label: 'RAM', p: st.mem.percent, text: `${gb(st.mem.used)} / ${gb(st.mem.total)}`, tip: st.swap ? `Swap ${gb(st.swap.used)} / ${gb(st.swap.total)}` : '無 Swap' },
   st.disk && { label: '硬碟', p: st.disk.percent, text: `剩 ${gb(st.disk.free)}`, tip: `/ 已用 ${gb(st.disk.used)}，共 ${gb(st.disk.total)}` },
 ].filter(Boolean);
@@ -210,7 +230,8 @@ async function checkNodes() {
   checking.value = true;
   try {
     nodes.value = await api.post('/nodes/check');
-    ElMessage.success('節點連線檢測完成');
+    await loadBackendStatus();
+    ElMessage.success('節點與後端連線檢測完成');
   } catch (e) { ElMessage.error(e.message); } finally { checking.value = false; }
 }
 
@@ -625,7 +646,7 @@ function closeDeploy() {
   return undefined;
 }
 
-onBeforeUnmount(() => { if (es) es.close(); });
+onBeforeUnmount(() => { if (es) es.close(); if (backendTimer) clearInterval(backendTimer); });
 
 /* ------------------------------------------------------------------ 部署紀錄詳情 */
 const logDlg = reactive({ visible: false, data: null });
@@ -636,7 +657,11 @@ async function showLog(row) {
   } catch (e) { ElMessage.error(e.message); }
 }
 
-onMounted(loadAll);
+onMounted(() => {
+  loadAll();
+  // 每 30 秒讀一次後端燈號（只讀伺服器記憶體中的結果，負擔極小）
+  backendTimer = setInterval(loadBackendStatus, 30000);
+});
 </script>
 
 <template>
@@ -713,6 +738,7 @@ onMounted(loadAll);
             <template #default="{ row }">
               <div class="ups">
                 <div v-for="(u, i) in ruleUpstreams(row)" :key="i" class="ups-item" :class="{ off: !u.IsActive }">
+                  <span class="dot" :class="backendLight(u).cls" :title="backendLight(u).tip" />
                   {{ u.Host }}:{{ u.Port }}
                   <el-tag v-if="u.Weight > 1" size="small" type="info">×{{ u.Weight }}</el-tag>
                   <el-tag v-if="u.IsBackup" size="small" type="warning">備援</el-tag>
@@ -746,6 +772,12 @@ onMounted(loadAll);
             <template #default="{ row }"><el-switch :model-value="row.IsMaintenance" size="small" active-color="#e6a23c" @change="(v) => quickToggle(row, 'IsMaintenance', v)" /></template>
           </el-table-column>
           <el-table-column prop="Remark" label="備註" min-width="160" show-overflow-tooltip />
+          <el-table-column prop="CreatedAt" label="建立日期" width="170" align="center" sortable>
+            <template #default="{ row }"><span class="date-cell">{{ fmt(row.CreatedAt) }}</span></template>
+          </el-table-column>
+          <el-table-column prop="UpdatedAt" label="最後更動" width="170" align="center" sortable>
+            <template #default="{ row }"><span class="date-cell">{{ fmt(row.UpdatedAt) }}</span></template>
+          </el-table-column>
           <el-table-column label="操作" width="220" fixed="right" align="center">
             <template #default="{ row }">
               <el-button size="small" :icon="Connection" circle title="從節點測試後端連線" @click="probeRule(row)" />
@@ -1250,6 +1282,7 @@ onMounted(loadAll);
 .node-card.inactive { opacity: 0.6; }
 .domain-link { color: var(--el-color-primary); text-decoration: none; word-break: break-all; }
 .domain-link:hover { text-decoration: underline; }
+.date-cell { font-size: 12px; color: #606266; white-space: nowrap; }
 .node-tools { display: flex; align-items: center; gap: 12px; flex: none; }
 .node-tools .el-button + .el-button { margin-left: 0; }
 .node-row { display: flex; align-items: center; gap: 12px; }
@@ -1279,6 +1312,12 @@ onMounted(loadAll);
 .ups { display: grid; gap: 2px; }
 .ups-item { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .ups-item.off { color: #c0c4cc; text-decoration: line-through; }
+/* 後端連線燈號：綠＝全部節點可連、黃＝部分節點可連、紅＝全部連不上、灰＝尚未檢測、淡灰＝已停用 */
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block; background: #c0c4cc; cursor: help; }
+.dot.green { background: #3fb950; }
+.dot.yellow { background: #e3b341; }
+.dot.red { background: #f85149; }
+.dot.off { background: #ebeef5; }
 .ups-method { justify-self: start; margin-top: 2px; }
 .ups-edit { width: 100%; display: grid; gap: 6px; }
 .ups-head, .ups-row { display: grid; grid-template-columns: minmax(120px, 1fr) 110px 90px 40px 44px 32px; gap: 6px; align-items: center; }

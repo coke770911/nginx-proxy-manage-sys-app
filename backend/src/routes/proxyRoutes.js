@@ -64,6 +64,9 @@ router.get('/nodes', wrap(async (req, res) => {
   res.json(await healthService.listNodes());
 }));
 
+/** 後端連線狀態（隨節點健康檢查定期更新，只讀記憶體，不會即時去測） */
+router.get('/backend-status', (req, res) => res.json(healthService.getBackendStatus()));
+
 router.post('/nodes/check', wrap(async (req, res) => {
   res.json(await healthService.checkAllNodes());
 }));
@@ -265,12 +268,14 @@ router.put('/rules/:id', wrap(async (req, res) => {
   const data = normalizeRule(pick(req.body, RULE_FIELDS));
   const ups = normalizeUpstreams(req.body || {});
   await checkRule({ ...before, ...data, Upstreams: ups || beforeUps });
+  // 只改後端主機時規則本身欄位不變，仍要更新 UpdatedAt（清單「最後更動」與「尚未部署」提示依此判斷）
+  const upsChanged = !!ups && upText(ups) !== upText(beforeUps);
   await sequelize.transaction(async (t) => {
-    await rule.update({ ...data, ...(ups ? primaryOf(ups) : {}) }, { transaction: t });
+    await rule.update({ ...data, ...(ups ? primaryOf(ups) : {}), ...(upsChanged ? { UpdatedAt: new Date() } : {}) }, { transaction: t });
     if (ups) await replaceUpstreams(rule.Id, ups, t);
   });
   const detail = audit.diff({ ...before }, data);
-  if (ups && upText(ups) !== upText(beforeUps)) detail.Upstreams = [upText(beforeUps), upText(ups)];
+  if (upsChanged) detail.Upstreams = [upText(beforeUps), upText(ups)];
   await audit.record(req, { action: 'UPDATE', targetType: 'RULE', targetId: rule.Id, targetName: rule.DomainName, detail });
   res.json(await loadRule(rule.Id));
 }));
@@ -354,10 +359,11 @@ router.post('/rules/import', wrap(async (req, res) => {
         if (!rule) throw new HttpError(409, `第 ${r.line} 列要覆蓋的規則已不存在，請重新檢查`);
         const before = { ...rule.get({ plain: true }) };
         const beforeUps = (before.Upstreams || []).map((u) => ({ ...u }));
-        await rule.update({ ...fields, ...primaryOf(ups) }, { transaction: t });
+        const upsChanged = upText(ups) !== upText(beforeUps);
+        await rule.update({ ...fields, ...primaryOf(ups), ...(upsChanged ? { UpdatedAt: new Date() } : {}) }, { transaction: t });
         await replaceUpstreams(rule.Id, ups, t);
         const detail = { ...audit.diff(before, fields), 來源: 'CSV 匯入' };
-        if (upText(ups) !== upText(beforeUps)) detail.Upstreams = [upText(beforeUps), upText(ups)];
+        if (upsChanged) detail.Upstreams = [upText(beforeUps), upText(ups)];
         done.push({ action: 'UPDATE', id: rule.Id, domain: rule.DomainName, detail });
       }
     }

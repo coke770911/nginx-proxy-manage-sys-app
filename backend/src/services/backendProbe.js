@@ -11,8 +11,8 @@ const HOST_RE = /^[A-Za-z0-9]([A-Za-z0-9.-]{0,253}[A-Za-z0-9])?$/;
 const PROBE_TIMEOUT = 5;
 const MAX_TARGETS = 64;
 
-/** 清理並去除重複的測試目標 [{ host, port }] */
-function cleanTargets(list) {
+/** 清理並去除重複的測試目標 [{ host, port }]；max = 上限（超過即丟錯） */
+function cleanTargets(list, max = MAX_TARGETS) {
   const seen = new Set();
   const out = [];
   (list || []).forEach((t) => {
@@ -24,20 +24,26 @@ function cleanTargets(list) {
     seen.add(key);
     out.push({ host, port });
   });
-  if (out.length > MAX_TARGETS) throw new Error(`一次最多測試 ${MAX_TARGETS} 台後端`);
+  if (out.length > max) throw new Error(`一次最多測試 ${max} 台後端`);
   return out;
 }
 
-/** 組出在節點上執行的指令：每個目標一個背景子程序，輸出一行 R|host|port|結果|毫秒|HTTP 碼 */
-function buildScript(targets) {
-  const T = PROBE_TIMEOUT;
+/**
+ * 組出在節點上執行的指令：每個目標一個背景子程序，輸出一行 R|host|port|結果|毫秒|HTTP 碼
+ * opt.timeout：每台等待秒數；opt.tcpOnly：只測 TCP，不送 HTTP 請求（定期檢測用，不會在後端留下存取紀錄）
+ */
+function buildScript(targets, { timeout = PROBE_TIMEOUT, tcpOnly = false } = {}) {
+  const T = timeout;
+  const http = (host, port) => (tcpOnly
+    ? 'c=;'
+    : `c=$(curl -s -o /dev/null -m ${T} -w '%{http_code}' 'http://${host}:${port}/' 2>/dev/null); [ -n "$c" ] || c=000;`);
   const one = ({ host, port }) => [
     '(',
     's=$(date +%s%N);',
     `timeout ${T} bash -c '</dev/tcp/${host}/${port}' 2>/dev/null; rc=$?;`,
     'e=$(date +%s%N);',
     'if [ $rc -eq 0 ]; then',
-    `  c=$(curl -s -o /dev/null -m ${T} -w '%{http_code}' 'http://${host}:${port}/' 2>/dev/null); [ -n "$c" ] || c=000;`,
+    `  ${http(host, port)}`,
     `  echo "R|${host}|${port}|OK|$(( (e-s)/1000000 ))|$c";`,
     `elif [ $rc -eq 124 ]; then echo "R|${host}|${port}|TIMEOUT|$(( (e-s)/1000000 ))|";`,
     `else echo "R|${host}|${port}|REFUSED|$(( (e-s)/1000000 ))|"; fi`,
@@ -48,7 +54,7 @@ function buildScript(targets) {
 
 const REASON = {
   OK: '連線成功',
-  TIMEOUT: `逾時（${PROBE_TIMEOUT} 秒內無回應，可能被防火牆擋住或主機未開機）`,
+  TIMEOUT: '逾時（時限內無回應，可能被防火牆擋住或主機未開機）',
   REFUSED: '拒絕連線或無法解析（該 Port 沒有服務在監聽，或主機名稱解析失敗）',
 };
 
@@ -64,10 +70,11 @@ function parse(out, targets) {
   });
 }
 
-/** 在一個已開啟的 NodeSession 上測試 */
-async function probeOnSession(session, targets) {
+/** 在一個已開啟的 NodeSession 上測試（opt 同 buildScript） */
+async function probeOnSession(session, targets, opt = {}) {
   if (!targets.length) return [];
-  const r = await session.exec(buildScript(targets), (PROBE_TIMEOUT * 2 + 10) * 1000);
+  const t = opt.timeout || PROBE_TIMEOUT;
+  const r = await session.exec(buildScript(targets, opt), (t * 2 + 10) * 1000);
   return parse(r.stdout, targets);
 }
 
