@@ -27,7 +27,18 @@ async function loadAll() {
 }
 
 /* ------------------------------------------------------------------ 共用工具 */
-const fmt = (d) => (d ? new Date(d).toLocaleString('zh-TW', { hour12: false }) : '—');
+const pad2 = (n) => String(n).padStart(2, '0');
+/** 統一的當地時間格式：YYYY/MM/DD HH:mm:ss */
+const fmt = (d) => {
+  if (!d) return '—';
+  const t = new Date(d);
+  if (Number.isNaN(t.getTime())) return String(d);
+  return `${t.getFullYear()}/${pad2(t.getMonth() + 1)}/${pad2(t.getDate())} ${pad2(t.getHours())}:${pad2(t.getMinutes())}:${pad2(t.getSeconds())}`;
+};
+/** 規則網址：有綁憑證走 https，否則 http */
+const siteUrl = (r) => `${r.CertificateId ? 'https' : 'http'}://${r.DomainName}/`;
+/** 舊部署紀錄每行開頭是 UTC ISO 時間，轉成當地時間顯示 */
+const localizeLog = (text) => String(text || '').replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/gm, (iso) => fmt(iso));
 const daysLeft = (d) => Math.floor((new Date(d).getTime() - Date.now()) / 86400000);
 
 function certTag(validTo) {
@@ -670,8 +681,10 @@ onMounted(loadAll);
           </div>
         </template>
       </el-card>
-      <el-button :icon="Refresh" :loading="checking" circle title="重新檢測節點連線" @click="checkNodes" />
-      <el-button :icon="Plus" circle title="新增節點" @click="openNode(null)" />
+      <div class="node-tools">
+        <el-button :icon="Refresh" :loading="checking" circle title="重新檢測節點連線" @click="checkNodes" />
+        <el-button :icon="Plus" circle title="新增節點" @click="openNode(null)" />
+      </div>
     </section>
 
     <el-tabs v-model="tab" class="tabs" @tab-change="onTabChange">
@@ -681,12 +694,21 @@ onMounted(loadAll);
           <el-button type="primary" :icon="Plus" @click="openRule(null)">新增規則</el-button>
           <el-button :icon="Upload" @click="openImport">匯入</el-button>
           <el-button :icon="Download" @click="exportRules">匯出</el-button>
-          <el-input v-model="ruleQuery" :prefix-icon="Search" clearable placeholder="搜尋網域或後端 IP" class="search" />
-          <span v-if="ruleQuery" class="hint">找到 {{ filteredRules.length }} / {{ rules.length }} 筆</span>
           <span class="hint">修改後需按右上角「一鍵同步部署」才會推送到 Nginx 節點。</span>
         </div>
+        <div class="toolbar search-bar">
+          <el-input v-model="ruleQuery" :prefix-icon="Search" clearable placeholder="搜尋網域或後端 IP" class="search" />
+          <span v-if="ruleQuery" class="hint">找到 {{ filteredRules.length }} / {{ rules.length }} 筆</span>
+        </div>
         <el-table :data="filteredRules" stripe border style="width: 100%" :empty-text="ruleQuery ? '查無符合的規則' : '尚無規則'">
-          <el-table-column prop="DomainName" label="來源網域" min-width="200" fixed />
+          <el-table-column prop="DomainName" label="來源網域" min-width="200" fixed>
+            <template #default="{ row }">
+              <!-- 萬用字元網域（*.xxx）無法直接開啟，只顯示文字 -->
+              <span v-if="row.DomainName.startsWith('*.')">{{ row.DomainName }}</span>
+              <a v-else class="domain-link" :href="siteUrl(row)" target="_blank" rel="noopener noreferrer"
+                 :title="`另開視窗：${siteUrl(row)}`">{{ row.DomainName }}</a>
+            </template>
+          </el-table-column>
           <el-table-column label="後端目標" min-width="200">
             <template #default="{ row }">
               <div class="ups">
@@ -1206,7 +1228,7 @@ onMounted(loadAll);
                   :type="r.error ? 'danger' : 'success'">{{ r.name }} · {{ r.error ? '失敗' : '正常' }}</el-tag>
         </div>
         <pre v-if="logDlg.data.ErrorDetail" class="code err">{{ logDlg.data.ErrorDetail }}</pre>
-        <pre class="code">{{ logDlg.data.LogText }}</pre>
+        <pre class="code">{{ localizeLog(logDlg.data.LogText) }}</pre>
       </template>
     </el-dialog>
   </div>
@@ -1226,6 +1248,10 @@ onMounted(loadAll);
 .nodes { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 8px; }
 .node-card { flex: 1 1 280px; max-width: 420px; }
 .node-card.inactive { opacity: 0.6; }
+.domain-link { color: var(--el-color-primary); text-decoration: none; word-break: break-all; }
+.domain-link:hover { text-decoration: underline; }
+.node-tools { display: flex; align-items: center; gap: 12px; flex: none; }
+.node-tools .el-button + .el-button { margin-left: 0; }
 .node-row { display: flex; align-items: center; gap: 12px; }
 .node-info { flex: 1; min-width: 0; }
 .node-name { font-weight: 600; }
@@ -1300,7 +1326,9 @@ div.probe-meta { margin: 4px 0 0; }
 @media (max-width: 768px) {
   .page { padding: 10px; }
   .topbar h1 { font-size: 18px; }
-  .node-card { max-width: none; }
+  .node-card { flex-basis: 100%; max-width: none; }
+  /* 手機版：重新整理 / 新增節點按鈕獨立一列放在卡片上方右側，不再擠壓卡片 */
+  .node-tools { order: -1; width: 100%; justify-content: flex-end; }
   .actions { width: 100%; justify-content: space-between; }
   .search, .search.wide, .sel, .range { width: 100%; max-width: none; }
   .ups-head { display: none; }

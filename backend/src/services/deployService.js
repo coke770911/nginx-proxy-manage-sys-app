@@ -41,10 +41,16 @@ class DeployError extends Error {
 const rel = (p) => p.replace(/^\/+/, '');
 const errText = (e) => (e && e.message ? e.message : String(e));
 
+/** 伺服器當地時間，格式 YYYY/MM/DD HH:mm:ss（寫入部署紀錄用） */
+const pad2 = (n) => String(n).padStart(2, '0');
+const localStamp = (d) => `${d.getFullYear()}/${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+
 function makeLogger(lines) {
   return (level, msg, node) => {
-    const entry = { ts: new Date().toISOString(), level, node: node || null, msg };
-    lines.push(`${entry.ts} [${level.toUpperCase()}]${node ? ` [${node}]` : ''} ${msg}`);
+    const now = new Date();
+    // SSE 傳 ISO（前端依瀏覽器時區顯示）；存入資料庫的文字改用當地時間
+    const entry = { ts: now.toISOString(), level, node: node || null, msg };
+    lines.push(`${localStamp(now)} [${level.toUpperCase()}]${node ? ` [${node}]` : ''} ${msg}`);
     bus.emit('log', entry);
   };
 }
