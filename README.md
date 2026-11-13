@@ -643,6 +643,7 @@ sudo logrotate -d /etc/logrotate.d/nginx 2>&1 | grep -iE "error|rotating pattern
 - 版本相容：HTTP/2 寫法由 `.env` 的 `NGINX_HTTP2_SYNTAX` 決定。`modern`（預設）產生 `listen 443 ssl;` + `http2 on;`，適用 nginx ≥ 1.25.1（Ubuntu 26.04）；`legacy` 產生 `listen 443 ssl http2;`，適用 nginx 1.24（Ubuntu 24.04），在新版 nginx 上會出現過時警告。兩台節點請使用相同 Ubuntu 版本。
 - 自訂 Nginx 語法插入 443 server 區塊（位於 `location /` 之前），僅檢查大括號成對，語法正確性由 `nginx -t` 把關。
 - 介面上的時間一律以當地時間 `YYYY/MM/DD HH:mm:ss` 顯示；部署紀錄 Log 以伺服器當地時間寫入，舊紀錄中的 UTC 時間會在顯示時自動轉換。
+- 每頁底部有頁尾，顯示系統名稱、版本號與「亞東科技大學 圖書資訊處 © 2026 建置」。版本號在建置前端時從 `frontend/package.json` 帶入（`npm run release` 會同步），所以發佈後要重新建置前端，頁尾才會顯示新版號。
 - 手機版（寬度 768px 以下）節點卡片滿版顯示，「重新檢測 / 新增節點」按鈕移到卡片上方，不會擠壓卡片。
 - 憑證上傳對話框每次開啟都會重置檔案欄位（`destroy-on-close`），選取的 PEM / PFX 檔會正確帶入表單。
 
