@@ -74,13 +74,14 @@ router.get('/backend-status', (req, res) => res.json(healthService.getBackendSta
 
 /**
  * 讀取節點 Nginx Log（唯讀）
- * query: type=access|error、lines=100|200|500|1000|2000、q=關鍵字（不分大小寫的固定字串）
+ * query: type=access|error|waf、lines=100|200|500|1000|2000、q=關鍵字（不分大小寫的固定字串）、
+ *        domain=網域（只用於 waf，讀 waf-<網域>.log；空白 = 全部網域 waf.log）
  */
 router.get('/nodes/:id/logs', wrap(async (req, res) => {
   const node = await ProxyNode.findByPk(req.params.id);
   if (!node) throw new HttpError(404, '節點不存在');
   try {
-    const r = await nodeLog.readNodeLog(node, { type: req.query.type, lines: req.query.lines, q: req.query.q });
+    const r = await nodeLog.readNodeLog(node, { type: req.query.type, lines: req.query.lines, q: req.query.q, domain: req.query.domain });
     res.json({ node: nodeName(node), ...r });
   } catch (e) {
     if (e instanceof nodeLog.LogError) return res.status(e.status).json({ message: e.message, hint: e.hint || null });

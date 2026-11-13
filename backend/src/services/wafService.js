@@ -23,6 +23,18 @@ const RULE_ID_RE = /^\d{6,7}$/; // CRS 規則 ID 為 6 位數（9xxxxx），保�
 const WAF_CONF_NAME = '_waf.conf';
 const WAF_RULES_NAME = '_waf_main.rules';
 const WAF_LOG_NAME = 'waf.log'; // 位於 REMOTE_LOG_DIR（/var/log/nginx），沿用該目錄的 ACL 與 logrotate（保留一年）
+// 與 nginxTemplate 的 DOMAIN_RE 相同（此處另寫一份，避免循環 require）
+const LOG_DOMAIN_RE = /^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
+
+/**
+ * 每個網域自己的 WAF log 檔名：waf-<網域>.log；萬用字元網域 *.x → waf-_.x.log（_ 不是合法網域字元，不會撞名）
+ * 網域必須通過白名單格式，否則丟錯（檔名會寫進設定檔與 shell 指令）
+ */
+function wafDomainLogName(domain) {
+  const d = String(domain || '').trim().toLowerCase();
+  if (!LOG_DOMAIN_RE.test(d)) throw new Error(`網域格式不正確：${String(domain).slice(0, 80)}`);
+  return `waf-${d.replace(/^\*\./, '_.')}.log`;
+}
 
 /** 節點上必須存在的檔案（由 sysadmin 以 apt 安裝；deployer 只需讀取） */
 const NODE_PATHS = {
@@ -151,16 +163,18 @@ function serverWafLines(rule, settings) {
   return [
     `    # WAF：${WAF_MODE_LABEL[rule.WafMode]}${ids.length ? `，排除 ${ids.length} 條規則` : ''}`,
     // ModSecurity-nginx 把每條命中的規則記在 info 等級、只有阻擋結果是 error 等級；
-    // 另寫一份 info 等級的 waf.log 才看得到「僅偵測」的事件與個別規則 ID，error.log 維持原本等級
+    // 另寫 info 等級的 waf.log（全部網域）與 waf-<網域>.log（本網域）才看得到「僅偵測」的事件與個別規則 ID，
+    // error.log 維持原本等級
     `    error_log ${config.ssh.logDir}/error.log;`,
     `    error_log ${config.ssh.logDir}/${WAF_LOG_NAME} info;`,
+    `    error_log ${config.ssh.logDir}/${wafDomainLogName(rule.DomainName)} info;`,
     '    modsecurity on;',
     `    modsecurity_rules '${body.join('\n        ')}';`,
   ];
 }
 
 module.exports = {
-  WAF_MODES, WAF_MODE_LABEL, WAF_CONF_NAME, WAF_RULES_NAME, WAF_LOG_NAME, WAF_CHECK_CMD, NODE_PATHS,
+  WAF_MODES, WAF_MODE_LABEL, WAF_CONF_NAME, WAF_RULES_NAME, WAF_LOG_NAME, WAF_CHECK_CMD, NODE_PATHS, wafDomainLogName,
   parseWafCheck, parseExcludeIds, normalizeExcludeIds, validateRuleWaf, validateSettings, ruleWafActive,
   renderWafConf, renderWafRules, serverWafLines,
 };

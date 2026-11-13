@@ -661,6 +661,7 @@ async function removeRule(row) {
   } catch { return; }
   try {
     await api.delete(`/rules/${row.Id}`);
+    if (ruleDlg.id === row.Id) ruleDlg.visible = false;
     ElMessage.success('已刪除');
     await loadAll();
   } catch (e) { ElMessage.error(e.message); }
@@ -781,7 +782,7 @@ onBeforeUnmount(() => { if (es) es.close(); if (backendTimer) clearInterval(back
 /* ------------------------------------------------------------------ 節點 Nginx Log */
 const NODE_LOG_LINES = [100, 200, 500, 1000, 2000];
 const nodeLogDlg = reactive({
-  visible: false, node: null, type: 'access', lines: 200, q: '',
+  visible: false, node: null, type: 'access', lines: 200, q: '', domain: '',
   loading: false, data: null, error: '', hint: '', auto: false, newestFirst: true,
 });
 let nodeLogTimer = null;
@@ -794,8 +795,9 @@ async function loadNodeLog() {
   if (!nodeLogDlg.node || nodeLogDlg.loading) return;
   nodeLogDlg.loading = true;
   try {
-    const { type, lines, q } = nodeLogDlg;
-    nodeLogDlg.data = await api.get(`/nodes/${nodeLogDlg.node.Id}/logs`, { params: { type, lines, q: q.trim() || undefined } });
+    const { type, lines, q, domain } = nodeLogDlg;
+    const params = { type, lines, q: q.trim() || undefined, domain: type === 'waf' && domain ? domain : undefined };
+    nodeLogDlg.data = await api.get(`/nodes/${nodeLogDlg.node.Id}/logs`, { params });
     nodeLogDlg.error = '';
     nodeLogDlg.hint = '';
   } catch (e) {
@@ -824,6 +826,11 @@ function nodeLogClass(line) {
   if (m[1] >= '400') return 'warn';
   return '';
 }
+/** WAF Log 的網域選項：已設定 WAF（僅偵測 / 阻擋）的網域排前面，其餘網域也可選（可查曾開過 WAF 的舊紀錄） */
+const wafLogDomains = computed(() => {
+  const list = rules.value.map((r) => ({ name: r.DomainName, on: (r.WafMode || 'off') !== 'off' }));
+  return list.sort((a, b) => (b.on - a.on) || a.name.localeCompare(b.name));
+});
 const nodeLogLines = computed(() => {
   const l = nodeLogDlg.data?.lines || [];
   return nodeLogDlg.newestFirst ? [...l].reverse() : l;
@@ -852,7 +859,7 @@ onMounted(() => {
     <header class="topbar">
       <div>
         <h1>Nginx HA Proxy Manager</h1>
-        <div class="sub">校園網域反向代理與 SSL 憑證集中管理系統</div>
+        <div class="sub">反向代理伺服器節點管理系統</div>
       </div>
       <div class="actions">
         <el-tag v-if="pendingChanges" type="warning" effect="light" round>有尚未部署的變更</el-tag>
@@ -990,15 +997,14 @@ onMounted(() => {
               <div class="idle-days" :class="{ long: idleDays(row.UpdatedAt) >= 180 }">{{ idleText(row.UpdatedAt) }}</div>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="260" fixed="right" align="center">
+          <el-table-column label="操作" width="210" fixed="right" align="center">
             <template #default="{ row }">
               <el-button size="small" :icon="Aim" circle :disabled="!cutoverCfg.enabled"
                          :title="cutoverCfg.enabled ? `切換前檢查：模擬 DNS 改指 ${cutoverCfg.vip}` : '切換前檢查（尚未設定 CUTOVER_VIP）'"
                          @click="runCutoverCheck([row])" />
               <el-button size="small" :icon="Connection" circle title="從節點測試後端連線" @click="probeRule(row)" />
               <el-button size="small" :icon="View" circle title="預覽 Nginx 設定" @click="previewRule(row)" />
-              <el-button size="small" :icon="Edit" circle title="編輯" @click="openRule(row)" />
-              <el-button size="small" type="danger" :icon="Delete" circle title="刪除" @click="removeRule(row)" />
+              <el-button size="small" :icon="Edit" circle title="編輯（刪除也在編輯視窗內）" @click="openRule(row)" />
             </template>
           </el-table-column>
         </el-table>
@@ -1122,7 +1128,7 @@ onMounted(() => {
               </el-descriptions-item>
             </el-descriptions>
             <div class="form-hint" style="margin-top: 10px">
-              建議導入順序：總開關開啟 → 網域先設「僅偵測」並部署 → 觀察 1–2 週，在「檢視 Nginx Log」的 error.log 搜尋 <code>ModSecurity</code> 找出誤判，把規則 ID 加入排除 → 再改「阻擋」。
+              建議導入順序：總開關開啟 → 網域先設「僅偵測」並部署 → 觀察 1–2 週，在「檢視 Nginx Log」→「WAF 事件」選該網域找出誤判（兩台節點都要看），把規則 ID 加入排除 → 再改「阻擋」。
             </div>
           </el-card>
         </div>
@@ -1523,6 +1529,8 @@ onMounted(() => {
         <el-form-item label="備註"><el-input v-model="ruleDlg.form.Remark" maxlength="500" /></el-form-item>
       </el-form>
       <template #footer>
+        <el-button v-if="ruleDlg.id" class="rule-del-btn" type="danger" plain :icon="Delete" :disabled="ruleDlg.saving"
+                   @click="removeRule({ Id: ruleDlg.id, DomainName: ruleDlg.form.DomainName })">刪除此規則</el-button>
         <el-button @click="ruleDlg.visible = false">取消</el-button>
         <el-button type="primary" :loading="ruleDlg.saving" @click="saveRule">儲存</el-button>
       </template>
@@ -1628,6 +1636,13 @@ onMounted(() => {
           <el-radio-button value="error">錯誤紀錄 error.log</el-radio-button>
           <el-radio-button value="waf">WAF 事件 waf.log</el-radio-button>
         </el-radio-group>
+        <el-select v-if="nodeLogDlg.type === 'waf'" v-model="nodeLogDlg.domain" size="small" class="nlog-domain"
+                   placeholder="全部網域（waf.log）" @change="loadNodeLog">
+          <template #prefix>網域</template>
+          <el-option label="全部網域（waf.log）" value="" />
+          <el-option v-for="d in wafLogDomains" :key="d.name" :value="d.name"
+                     :label="d.on ? d.name : `${d.name}（WAF 未開啟）`" />
+        </el-select>
         <el-select v-model="nodeLogDlg.lines" size="small" class="nlog-lines" @change="loadNodeLog">
           <el-option v-for="n in NODE_LOG_LINES" :key="n" :label="`最後 ${n} 行`" :value="n" />
         </el-select>
@@ -1699,6 +1714,7 @@ onMounted(() => {
 .waf-card .hint { margin-left: 10px; }
 @media (max-width: 900px) { .waf-page { grid-template-columns: 1fr; } }
 .idle-days { font-size: 12px; color: #909399; white-space: nowrap; }
+.rule-del-btn { float: left; }
 .cut-body { min-height: 160px; }
 .cut-summary { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
 .cut-summary .hint { margin-left: auto; }
@@ -1737,10 +1753,12 @@ onMounted(() => {
 .hint { color: #909399; font-size: 12px; }
 .nlog-bar { margin-bottom: 8px; }
 .nlog-lines { width: 120px; }
+.nlog-domain { width: 240px; }
 .nlog-q { width: 240px; }
-.nlog-box { height: 60vh; }
+/* 需比後面的 .logbox（固定 340px）更明確才不會被蓋掉；視窗 top 4vh，扣掉標題列與工具列約 250px */
+.logbox.nlog-box { height: calc(92vh - 250px); min-height: 360px; }
 .nlog-hint { margin: 8px 0 0; white-space: pre-wrap; font-family: Consolas, 'Courier New', monospace; font-size: 12px; }
-@media (max-width: 768px) { .nlog-q, .nlog-lines { width: 100%; } }
+@media (max-width: 768px) { .nlog-q, .nlog-lines, .nlog-domain { width: 100%; } }
 .row-count { margin-left: auto; color: #606266; font-size: 13px; white-space: nowrap; }
 .row-count b { color: var(--el-color-primary); font-weight: 600; }
 .search { width: 240px; }

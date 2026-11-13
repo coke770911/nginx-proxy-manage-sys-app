@@ -30,6 +30,7 @@
 - 設定檔沿用原本的部署流程：全部節點 `nginx -t` 通過才 reload，任一失敗即回滾。
 - **稽核紀錄（audit log）刻意關閉**：它會記下 POST 內容（含登入密碼）。WAF 事件改寫入 `/var/log/nginx/waf.log`（見下方說明），用管理介面「檢視 Nginx Log」→「WAF 事件」查看。
 - **WAF 事件 Log**：ModSecurity 把每條命中的規則記在 Nginx 的 **info** 等級，只有「阻擋」結果（`949110 Access denied`）是 error 等級。因此開啟 WAF 的網域會另寫一份 info 等級的 `waf.log`（含個別規則 ID），`error.log` 維持原本等級，只會看到阻擋那一行。`waf.log` 沿用 `/var/log/nginx` 的 ACL 與 logrotate（保留一年）。
+- **每個網域各自一份**：另寫 `/var/log/nginx/waf-<網域>.log`（例：`waf-dosa.aeust.edu.tw.log`；萬用字元網域 `*.x` 為 `waf-_.x.log`），`waf.log` 則是全部網域合併。「檢視 Nginx Log」→「WAF 事件」旁的下拉選單可選「全部網域」或單一網域（已開 WAF 的網域排前面）。每台節點各有自己的檔案，F5 會把請求分給兩台，查事件時兩台都要看。
 - 大型上傳只檢查前段內容（`SecRequestBodyLimitAction ProcessPartial`），不會因為檔案太大被擋。
 - 管理介面只開放「模式三選一」與「數字規則 ID」，**不提供自訂 ModSecurity 規則**（規則語法可以執行外部程式，有安全風險）。
 
@@ -157,7 +158,7 @@ sudo nginx -t && sudo systemctl reload nginx
 ## 5. 誤判處理
 
 1. 使用者回報某功能被擋（403），或在「僅偵測」期間的 waf.log 看到正常操作被記錄。
-2. 「檢視 Nginx Log」→「WAF 事件 waf.log」，關鍵字填網域或 IP，找到該次請求，記下 `[id "xxxxxx"]`（同一請求可能有多條）。
+2. 「檢視 Nginx Log」→「WAF 事件」，網域下拉選該網域（或關鍵字填 IP），找到該次請求，記下 `[id "xxxxxx"]`（同一請求可能有多條）。
    - `949110`（Inbound Anomaly Score Exceeded）是「總分超標」的結果，**不要排除它**，要排除的是前面累加分數的那幾條。
 3. 編輯該網域規則 → 「WAF 排除規則」填入那些 ID → 儲存 → 一鍵同步部署。
 4. 請使用者再試一次。
@@ -177,6 +178,7 @@ sudo nginx -t && sudo systemctl reload nginx
 | 開啟 WAF 後網站變慢 | 嚴格程度調回 1；觀察節點卡片 CPU。大型上傳只檢查前段，不應明顯變慢 |
 | waf.log / error.log 的 `client:` 都是 F5 的 IP | PROXY protocol 沒有生效，WAF 看不到真實來源，請先處理（README「真實客戶端 IP」） |
 | 「WAF 事件」顯示節點上還沒有 waf.log | 尚未有網域開啟 WAF 並部署過；開啟後第一次部署才會建立 |
+| 選了某網域顯示還沒有 waf-<網域>.log | 該網域尚未開啟 WAF 並部署；關閉 WAF 後舊檔案仍保留在節點上，可選該網域查舊紀錄 |
 | 剛部署完測試沒反應 | reload 後舊 worker 還在處理連線，等約 5 秒再測 |
 | 想暫時全部停用 | 「WAF 防護」分頁關閉總開關 → 部署，所有網域立即回到未檢查狀態，網域上的設定保留 |
 | CRS 規則更新 | `modsecurity-crs` 屬 Ubuntu universe，安全更新可能較慢；可在節點執行 `sudo apt-get install --only-upgrade modsecurity-crs && sudo nginx -t && sudo systemctl reload nginx` |
@@ -272,6 +274,7 @@ CRS 預設允許 / 禁止清單（本系統沿用預設，未修改）：
 | 上傳用 `text/plain`、`application/octet-stream` 或其他 Content-Type | 920420 | 排除 `920420` |
 | 網站真的提供 `.config`、`.log`、`.dat`、`.db` 等副檔名的下載 | 920440 | 排除 `920440` |
 | 舊系統或特定瀏覽器送出 `Accept-Charset` 標頭 | 920450 | 排除 `920450` |
+| ASP.NET 的 `WebResource.axd` / `ScriptResource.axd`（實際案例：dosa 僅偵測期間命中） | 920440 | 排除 `920440` |
 | ASP.NET `__VIEWSTATE`、富文字編輯器送出 HTML | 941xxx（XSS） | 依 `waf.log` 的 ID 排除 |
 | 搜尋框、備註欄打出含 SQL 字樣的內容（`select … from`、單引號） | 942xxx（SQLi） | 依 `waf.log` 的 ID 排除 |
 | 表單欄位內容含 Linux / Windows 指令字樣（例如資訊課程教材） | 932xxx（RCE） | 依 `waf.log` 的 ID 排除 |

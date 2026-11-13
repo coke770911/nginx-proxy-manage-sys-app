@@ -73,11 +73,12 @@ X=$(mktemp -d) && cd $X && apt-get download libnginx-mod-http-modsecurity modsec
 5. 查事件：`ssh ... deployer@<IP> "grep -F ModSecurity /var/log/nginx/waf.log | tail -n 5"`，應有 `[id "942100"]` / `[id "941100"]` 與 `client: <真實 IP>`。
    - 個別規則命中是 Nginx **info** 等級，只寫在 `waf.log`（各 WAF 網域的 `error_log ... waf.log info;`）；`error.log` 只有阻擋結果 `949110 Access denied`。
    - reload 後等約 5 秒再測，避免打到舊 worker 造成假陰性。
+   - **實測前先查 WafSettings 與所有網域的 WafMode**：打開總開關會讓其他已設偵測 / 阻擋的網域一起生效；還原時只改回自己動過的欄位，總開關恢復成測試前的值。
 6. 改「阻擋」再部署，同樣請求應回 `403`。
 
 ## 4. 誤判處理
 
-1. 找事件：`grep -F ModSecurity /var/log/nginx/waf.log | grep -F '<網域>' | tail -n 50`（或請使用者用管理介面「檢視 Nginx Log」搜尋）。
+1. 找事件：`grep -F ModSecurity /var/log/nginx/waf-<網域>.log | tail -n 50`（每個 WAF 網域各一檔，`waf.log` 為全部合併；兩台節點都要查）（或請使用者用管理介面「檢視 Nginx Log」搜尋）。
 2. 整理該請求命中的 `[id "…"]`（網域排除優先於全域嚴格程度，見操作手冊 3-3；已實測 testssl1 排除 942100 有效）；**不要排除 949110 / 959100 / 980130**（總分判定與彙總），要排除的是累加分數的個別規則。
 3. 請使用者在該網域的「WAF 排除規則」填入 ID（逗號分隔）→ 儲存 → 部署；或確認後由 Claude 以 API 修改。
 4. 常見誤判：ASP.NET `__VIEWSTATE`（942xxx）、富文字 HTML（941xxx）、含 SQL 字樣的搜尋、Cookie 過多 / 過長（920xxx）。

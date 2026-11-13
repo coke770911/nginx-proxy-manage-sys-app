@@ -31,7 +31,7 @@ async function submit() {
   <div class="login-page">
     <el-card class="login-card" shadow="always">
       <h1>Nginx HA Proxy Manager</h1>
-      <div class="sub">校園網域反向代理與 SSL 憑證集中管理系統</div>
+      <div class="sub">反向代理伺服器節點管理系統</div>
       <el-form @submit.prevent="submit">
         <el-form-item>
           <el-input v-model="form.username" :prefix-icon="User" placeholder="帳號" size="large" autocomplete="username" autofocus />
