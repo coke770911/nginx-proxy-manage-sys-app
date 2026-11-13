@@ -42,7 +42,13 @@
 - WAF 事件可在管理介面依節點、依網域查看（`waf-<網域>.log`），列出命中的規則代碼與真實來源 IP，方便找出誤判。
 - 節點卡片顯示 OS、nginx、ModSecurity、OWASP CRS 版本與模組安裝狀態。
 
-詳細設定請見下方「負載平衡」「網域規則匯入 / 匯出」「WAF 網站防火牆」等章節。
+### 5. IP 存取控制
+
+- **全域黑名單**：清單內的 IP / 網段連任何網域都回 403。
+- **網域層級**：每個網域可設 不限制 / 只允許清單 / 拒絕清單（例：後台只開放校內網段）。
+- 支援 IPv4 / IPv6 與 CIDR；被擋時回 403 頁面並顯示對方 IP，不會進 WAF、也不會送到後端。
+
+詳細設定請見下方「負載平衡」「網域規則匯入 / 匯出」「WAF 網站防火牆」「IP 存取控制」等章節。
 
 ## 目錄結構
 
@@ -74,6 +80,8 @@
 │        ├─ nodeLogService.js   讀取節點 Nginx access / error Log（唯讀、白名單）
 │        ├─ wafService.js       WAF 設定產生（ModSecurity 主規則檔、各網域開關）與白名單驗證、節點模組檢查
 │        ├─ wafSettingsService.js WAF 全域設定讀寫（WafSettings）
+│        ├─ ipAccessService.js  IP 存取控制：位址 / 網段驗證與正規化、geo 對照表與 server 判斷產生
+│        ├─ ipAccessSettingsService.js 全域 IP 黑名單讀寫（IpAccessSettings）
 │        ├─ ruleImport.js       網域規則 CSV 匯入解析、格式檢查、重複比對與匯出
 │        └─ healthService.js    節點燈號（SSH + nginx active）與 CPU / RAM / 硬碟使用率
 ├─ frontend/                    Vue 3 + Vite + Element Plus（views/Login.vue、views/Dashboard.vue）
@@ -435,6 +443,42 @@ sudo nginx -t && sudo systemctl reload nginx
 **5. 建議導入順序**：兩台裝好模組 → 開總開關 → 測試網域「僅偵測」驗證 → 全部網域「僅偵測」觀察 1–2 週、排除誤判 → 逐站改「阻擋」。
 
 **資料庫**：升級時重新執行 `database/schema.sql`（可重複執行），會在 `DomainRules` 加入 `WafMode`、`WafExcludeIds` 並建立 `WafSettings`。未執行前 WAF 視為關閉，不影響部署。
+
+## IP 存取控制
+
+| 位置 | 設定 |
+|---|---|
+| 「IP 存取控制」分頁 | **全域黑名單**：一行一筆 IP / 網段，「#」後為備註，最多 2000 筆；所有網域一律拒絕 |
+| 網域規則編輯視窗 | **IP 存取控制**：不限制（預設）/ 只允許 / 拒絕，加上該網域的清單（最多 200 筆）；「只允許」至少要一筆 |
+| 規則清單「IP 限制」欄 | 各網域模式與筆數，滑鼠移上去顯示清單 |
+
+**判斷順序**：全域黑名單 → 網域清單 → WAF → 轉送後端。
+
+**運作方式**：
+- 全域黑名單產生 `sites-managed/_ip_blocklist.conf`（http 層 `geo $remote_addr $npm_ip_blocked`），清單為空時不產生。
+- 網域清單產生在該網域設定檔頂端（`geo … $npm_ip_acl_r<規則 Id>`）。
+- 兩者都在 server 層的 rewrite 階段判斷（`if` → `rewrite` 到 internal 的 403 頁面），比 WAF 與 `proxy_pass` 更早；自訂語法加的 location 也受保護。
+- `/f5-health-check` 一律放行，避免 F5 誤判節點故障。
+- 來源 IP 是 PROXY protocol 還原後的真實 IP（`$remote_addr`）。
+
+**被擋的人看到**：403 頁面（柴犬拿放大鏡「4🔍3」），顯示「您的 IP：x.x.x.x」，方便回報管理者。紀錄在 access.log（狀態碼 403），可用「檢視 Nginx Log」搜尋 IP。
+
+**驗證**：
+- 只接受 IPv4 / IPv6 單一位址或 CIDR，網段自動整理成網路位址（`120.96.1.77/24` → `120.96.1.0/24`），重複自動去除。
+- 拒絕 `0.0.0.0/0`、`::/0`、`0.0.0.0`。
+- 備註只會成為設定檔註解，並去除換行與特殊符號。
+- 寫入設定檔的值全部經 `validateRule()` 驗證。
+
+**操作紀錄**：網域清單變更記在「網域規則」；全域黑名單記在「IP 存取控制」類別，包含新增 / 移除了哪些位址。
+
+**限制**：
+- 只控制「連到網站」的 HTTP/HTTPS 流量，不影響 SSH（SSH 由節點 ufw 控制）。
+- 直接連節點 IP、不經 F5 的連線，看到的是直連來源 IP。
+- CSV 匯入 / 匯出尚未包含 IP 欄位。
+
+**資料庫**：重新執行 `database/schema.sql`，會在 `DomainRules` 加入 `IpAccessMode`、`IpAccessList`，並建立 `IpAccessSettings`。未執行前視為沒有任何限制。
+
+**實測（testssl1，經 F5 VIP）**：拒絕清單填入測試電腦 IP 後，首頁與子路徑都回 403、頁面顯示真實 IP，`/f5-health-check` 仍是 200，其他網域不受影響；改回不限制後恢復 200。
 
 ## Ubuntu 節點事前準備（兩台皆需）
 

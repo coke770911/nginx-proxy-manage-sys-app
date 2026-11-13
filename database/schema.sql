@@ -133,6 +133,35 @@ IF NOT EXISTS (SELECT 1 FROM dbo.WafSettings WHERE Id = 1)
     INSERT INTO dbo.WafSettings (Id, Enabled, ParanoiaLevel, InboundThreshold) VALUES (1, 0, 1, 5);
 GO
 
+/* ---- IP 存取控制（v1.0.16 起）
+        IpAccessMode：off = 不限制（預設）；allow = 只允許清單內 IP；deny = 拒絕清單內 IP
+        IpAccessList：IPv4 / IPv6 位址或 CIDR，一行一筆，「#」後為備註（系統會再驗證） ---- */
+IF COL_LENGTH(N'dbo.DomainRules', N'IpAccessMode') IS NULL
+    ALTER TABLE dbo.DomainRules ADD
+        IpAccessMode NVARCHAR(16)  NOT NULL CONSTRAINT DF_DomainRules_IpAccessMode DEFAULT (N'off'),
+        IpAccessList NVARCHAR(MAX) NULL;
+GO
+IF OBJECT_ID(N'CK_DomainRules_IpAccessMode', N'C') IS NULL
+    ALTER TABLE dbo.DomainRules ADD CONSTRAINT CK_DomainRules_IpAccessMode CHECK (IpAccessMode IN (N'off', N'allow', N'deny'));
+GO
+
+/* ---------------------------------------------------------------------------
+   3a-2. IpAccessSettings — 全域 IP 黑名單（只有 Id = 1 一筆）
+         BlockList：一行一筆 IP / CIDR，「#」後為備註；所有網域一律拒絕，空白 = 不啟用
+   --------------------------------------------------------------------------- */
+IF OBJECT_ID(N'dbo.IpAccessSettings', N'U') IS NULL
+CREATE TABLE dbo.IpAccessSettings (
+    Id        INT           NOT NULL CONSTRAINT PK_IpAccessSettings PRIMARY KEY,
+    BlockList NVARCHAR(MAX) NULL,
+    UpdatedBy NVARCHAR(100) NULL,
+    UpdatedAt DATETIME2(3)  NOT NULL CONSTRAINT DF_IpAccessSettings_UpdatedAt DEFAULT (SYSUTCDATETIME()),
+    CONSTRAINT CK_IpAccessSettings_Single CHECK (Id = 1)
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM dbo.IpAccessSettings WHERE Id = 1)
+    INSERT INTO dbo.IpAccessSettings (Id, BlockList) VALUES (1, NULL);
+GO
+
 /* ---------------------------------------------------------------------------
    3b. RuleUpstreams — 每條規則的後端主機清單（Nginx upstream 成員）
        Weight：權重 1–100；IsBackup：備援機（主要後端都失效時才使用，cookie 分配方式不可用）

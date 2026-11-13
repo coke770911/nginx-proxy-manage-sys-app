@@ -16,6 +16,8 @@ const nodeLog = require('../services/nodeLogService');
 const cutoverCheck = require('../services/cutoverCheck');
 const waf = require('../services/wafService');
 const wafSettings = require('../services/wafSettingsService');
+const ipAccess = require('../services/ipAccessService');
+const ipSettings = require('../services/ipAccessSettingsService');
 const config = require('../config');
 
 const router = express.Router();
@@ -199,7 +201,7 @@ router.delete('/certificates/:id', wrap(async (req, res) => {
 const RULE_FIELDS = [
   'DomainName', 'CertificateId', 'ForceHttps', 'EnableWebSocket',
   'ClientMaxBodySize', 'IsActive', 'IsMaintenance', 'CustomNginxSnippet', 'Remark', 'LbMethod', 'LbCookieName',
-  'WafMode', 'WafExcludeIds',
+  'WafMode', 'WafExcludeIds', 'IpAccessMode', 'IpAccessList',
 ];
 const RULE_BOOLS = ['ForceHttps', 'EnableWebSocket', 'IsActive', 'IsMaintenance'];
 const UP_ORDER = [[{ model: RuleUpstream, as: 'Upstreams' }, 'SortOrder', 'ASC'], [{ model: RuleUpstream, as: 'Upstreams' }, 'Id', 'ASC']];
@@ -225,12 +227,16 @@ function normalizeRule(data) {
   if (out.LbMethod && out.LbMethod !== 'cookie') out.LbCookieName = null;
   if ('WafMode' in out) out.WafMode = String(out.WafMode || 'off').trim();
   if ('WafExcludeIds' in out) out.WafExcludeIds = String(out.WafExcludeIds || '').trim() || null;
+  if ('IpAccessMode' in out) out.IpAccessMode = String(out.IpAccessMode || 'off').trim();
+  if ('IpAccessList' in out) out.IpAccessList = String(out.IpAccessList || '').trim() || null;
   return out;
 }
 
 /** 驗證通過後，排除規則 ID 整理成「942100,942200」格式再存 */
 function finalizeRule(data) {
   if ('WafExcludeIds' in data) data.WafExcludeIds = waf.normalizeExcludeIds(data.WafExcludeIds);
+  // IP 清單整理成「位址  # 備註」一行一筆（網段改為網路位址、去除重複）
+  if ('IpAccessList' in data) data.IpAccessList = ipAccess.normalizeListText(data.IpAccessList);
   return data;
 }
 
@@ -473,7 +479,8 @@ router.post('/rules/cutover-check', wrap(async (req, res) => {
 router.get('/rules/:id/preview', wrap(async (req, res) => {
   const rule = await loadRule(req.params.id);
   if (!rule) throw new HttpError(404, '規則不存在');
-  res.type('text/plain; charset=utf-8').send(renderConf(rule.get({ plain: true }), { waf: await wafSettings.get() }));
+  const ipBlock = (await ipSettings.blockEntries()).length > 0;
+  res.type('text/plain; charset=utf-8').send(renderConf(rule.get({ plain: true }), { waf: await wafSettings.get(), ipBlock }));
 }));
 
 /* =============================================================== WAF 全域設定 */
@@ -490,6 +497,32 @@ router.put('/waf/settings', wrap(async (req, res) => {
   const { before, after } = await wafSettings.update(req.body || {}, req.user?.username);
   const pickS = (x) => ({ Enabled: x.Enabled, ParanoiaLevel: x.ParanoiaLevel, InboundThreshold: x.InboundThreshold });
   await audit.record(req, { action: 'UPDATE', targetType: 'WAF', targetId: 1, targetName: 'WAF 全域設定', detail: audit.diff(pickS(before), pickS(after)) });
+  res.json(after);
+}));
+
+/* =============================================================== IP 存取控制（全域黑名單） */
+router.get('/ip-access/settings', wrap(async (req, res) => {
+  const s = await ipSettings.get();
+  const counts = { allow: 0, deny: 0 };
+  let blockCount = 0;
+  if (!s.missingTable) {
+    blockCount = ipAccess.parseList(s.BlockList, ipSettings.LIST_OPTS).entries.length;
+    (await DomainRule.findAll({ where: { IsActive: true }, attributes: ['IpAccessMode'] })).forEach((r) => { if (counts[r.IpAccessMode] !== undefined) counts[r.IpAccessMode] += 1; });
+  }
+  res.json({ ...s, blockCount, ruleCounts: counts, limits: { global: ipAccess.MAX_GLOBAL_ENTRIES, rule: ipAccess.MAX_RULE_ENTRIES } });
+}));
+
+router.put('/ip-access/settings', wrap(async (req, res) => {
+  const { before, after, count } = await ipSettings.update(req.body || {}, req.user?.username);
+  const lines = (t) => String(t || '').split(/\r?\n/).filter(Boolean);
+  const b = new Set(lines(before.BlockList).map((l) => l.split('#')[0].trim()));
+  const a = new Set(lines(after.BlockList).map((l) => l.split('#')[0].trim()));
+  const added = [...a].filter((x) => !b.has(x));
+  const removed = [...b].filter((x) => !a.has(x));
+  await audit.record(req, {
+    action: 'UPDATE', targetType: 'IP', targetId: 1, targetName: '全域 IP 黑名單',
+    detail: { 筆數: [b.size, count], 新增: added.slice(0, 50), 移除: removed.slice(0, 50) },
+  });
   res.json(after);
 }));
 

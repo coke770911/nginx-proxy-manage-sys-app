@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection, Download, Document, Aim, Lock } from '@element-plus/icons-vue';
+import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection, Download, Document, Aim, Lock, CircleClose } from '@element-plus/icons-vue';
 import api, { eventsUrl, session, logout } from '../api';
 
 /* ------------------------------------------------------------------ 資料 */
@@ -20,6 +20,7 @@ async function loadAll() {
       api.get('/nodes'), api.get('/certificates'), api.get('/rules'), api.get('/deploy/logs'),
     ]);
     loadWaf();
+    loadIp();
   } catch (e) {
     ElMessage.error(e.message);
   } finally {
@@ -126,7 +127,7 @@ const AUDIT_ACTION = {
   DEPLOY: { type: 'info', text: '部署' },
   CUTOVER_CHECK: { type: 'info', text: '切換前檢查' },
 };
-const AUDIT_TARGET = { AUTH: '登入', RULE: '網域規則', CERT: 'SSL 憑證', NODE: 'Nginx 節點', DEPLOY: '部署', ACCOUNT: '帳號管理', WAF: 'WAF 設定' };
+const AUDIT_TARGET = { AUTH: '登入', RULE: '網域規則', CERT: 'SSL 憑證', NODE: 'Nginx 節點', DEPLOY: '部署', ACCOUNT: '帳號管理', WAF: 'WAF 設定', IP: 'IP 存取控制' };
 const audit = reactive({ q: '', action: '', targetType: '', range: null, page: 1, pageSize: 50, total: 0, rows: [], loading: false });
 
 async function loadAudit(resetPage = false) {
@@ -155,6 +156,7 @@ const FIELD_LABEL = {
   Issuer: '發行商', Fingerprint: '憑證指紋', ValidTo: '到期日', Username: '帳號', DisplayName: '姓名 / 單位',
   Upstreams: '後端主機', LbMethod: '分配方式', LbCookieName: 'Cookie 名稱',
   WafMode: 'WAF 模式', WafExcludeIds: 'WAF 排除規則', Enabled: 'WAF 總開關', ParanoiaLevel: '嚴格程度', InboundThreshold: '阻擋門檻',
+  IpAccessMode: 'IP 存取控制', IpAccessList: 'IP 清單', 筆數: '筆數', 新增: '新增', 移除: '移除',
   reason: '原因', source: '帳號來源', status: '狀態', message: '訊息',
 };
 const auditDetail = (d) => {
@@ -240,7 +242,8 @@ const pendingChanges = computed(() => {
   const lastTs = last?.FinishedAt ? new Date(last.FinishedAt).getTime() : 0;
   const newest = Math.max(0, ...rules.value.map((r) => new Date(r.UpdatedAt).getTime()), ...certs.value.map((c) => new Date(c.UpdatedAt).getTime()),
     // WafSettings 只有被人修改過（UpdatedBy 有值）才算；資料表剛建立時的初始時間不算變更
-    wafCfg.value.UpdatedAt && wafCfg.value.UpdatedBy ? new Date(wafCfg.value.UpdatedAt).getTime() : 0);
+    wafCfg.value.UpdatedAt && wafCfg.value.UpdatedBy ? new Date(wafCfg.value.UpdatedAt).getTime() : 0,
+    ipCfg.value.UpdatedAt && ipCfg.value.UpdatedBy ? new Date(ipCfg.value.UpdatedAt).getTime() : 0);
   return newest > lastTs;
 });
 
@@ -285,6 +288,41 @@ function wafVerText(n) {
   return [ms && `ModSecurity ${ms}`, crs && `CRS ${crs}`].filter(Boolean).join(' · ') || '模組已安裝';
 }
 const wafNodesMissing = computed(() => nodes.value.filter((n) => n.IsActive && n.Stats && !n.Stats.error && nodeWaf(n) && !nodeWaf(n).ready));
+/* ------------------------------------------------------------------ IP 存取控制 */
+const IP_MODE = {
+  off: { text: '不限制', type: 'info', hint: '任何 IP 都可以連線（仍受全域黑名單限制）' },
+  allow: { text: '只允許', type: 'success', hint: '只有清單內的 IP / 網段可以連線，其他一律回 403（適合後台、內部系統）' },
+  deny: { text: '拒絕', type: 'danger', hint: '清單內的 IP / 網段回 403，其他照常連線' },
+};
+const ipCfg = ref({ BlockList: '', blockCount: 0, ruleCounts: { allow: 0, deny: 0 }, limits: { global: 2000, rule: 200 } });
+const ipForm = reactive({ BlockList: '' });
+const ipSaving = ref(false);
+async function loadIp() {
+  try {
+    ipCfg.value = await api.get('/ip-access/settings');
+    ipForm.BlockList = ipCfg.value.BlockList || '';
+  } catch { /* 舊版資料庫沒有 IpAccessSettings 時不打擾使用者 */ }
+}
+const ipDirty = computed(() => ipForm.BlockList.trim() !== (ipCfg.value.BlockList || '').trim());
+async function saveIp() {
+  ipSaving.value = true;
+  try {
+    await api.put('/ip-access/settings', { BlockList: ipForm.BlockList });
+    ElMessage.success('已儲存（需按「一鍵同步部署」才會生效）');
+    await loadIp();
+  } catch (e) { ElMessage.error(e.message); } finally { ipSaving.value = false; }
+}
+/** 清單文字的有效行數（不含空行與純註解） */
+const ipListCount = (t) => String(t || '').split(/\r?\n/).map((l) => l.split('#')[0].trim()).filter(Boolean).length;
+/** 規則清單的「IP 限制」欄位 */
+function ipTag(r) {
+  const mode = r.IpAccessMode || 'off';
+  if (mode === 'off') return { text: '不限制', type: 'info', tip: '' };
+  const n = ipListCount(r.IpAccessList);
+  const lines = String(r.IpAccessList || '').split(/\r?\n/).filter(Boolean);
+  return { text: `${IP_MODE[mode].text} ${n}`, type: IP_MODE[mode].type, tip: lines.slice(0, 8).join('、') + (lines.length > 8 ? `…共 ${lines.length} 筆` : '') };
+}
+
 /** 規則清單的 WAF 欄位：總開關關閉時以灰色標示「未生效」 */
 function wafTag(r) {
   const m = WAF_MODE[r.WafMode || 'off'] || WAF_MODE.off;
@@ -387,7 +425,7 @@ const blankRule = () => ({
   ForceHttps: true, EnableWebSocket: false, ClientMaxBodySize: '2M',
   IsActive: true, IsMaintenance: false, CustomNginxSnippet: '', Remark: '',
   LbMethod: 'round_robin', LbCookieName: '', Upstreams: [blankUpstream()],
-  WafMode: 'off', WafExcludeIds: '',
+  WafMode: 'off', WafExcludeIds: '', IpAccessMode: 'off', IpAccessList: '',
 });
 const LB_METHOD = {
   round_robin: { text: '輪流', hint: '依權重輪流分配，適合大多數系統' },
@@ -412,13 +450,14 @@ const ruleRules = {
   Upstreams: [{ validator: validateUpstreams, trigger: 'submit' }],
   LbCookieName: [{ validator: (_r, v, cb) => (ruleDlg.form.LbMethod !== 'cookie' || /^[A-Za-z0-9_]{1,64}$/.test(v || '') ? cb() : cb(new Error('Cookie 名稱只能用英數字與底線'))), trigger: 'blur' }],
   CertificateId: [{ required: true, message: '請選擇 SSL 憑證', trigger: 'change' }],
-  WafExcludeIds: [{ validator: (_r, v, cb) => (String(v || '').split(/[s,，、]+/).filter(Boolean).every((x) => /^d{6,7}$/.test(x)) ? cb() : cb(new Error('只能填 6–7 位數字的規則 ID，以逗號分隔'))), trigger: 'blur' }],
+  IpAccessList: [{ validator: (_r, v, cb) => (ruleDlg.form.IpAccessMode === 'off' || ipListCount(v) ? cb() : cb(new Error(ruleDlg.form.IpAccessMode === 'allow' ? '「只允許」至少要填一筆，否則所有人都無法連線' : '請至少填一筆 IP 或網段'))), trigger: 'blur' }],
+  WafExcludeIds: [{ validator: (_r, v, cb) => (String(v || '').split(/[\s,，、]+/).filter(Boolean).every((x) => /^\d{6,7}$/.test(x)) ? cb() : cb(new Error('只能填 6–7 位數字的規則 ID，以逗號分隔'))), trigger: 'blur' }],
 };
 
 function openRule(row) {
   ruleDlg.id = row ? row.Id : null;
   ruleDlg.form = row
-    ? { ...blankRule(), ...row, certificate: undefined, LbCookieName: row.LbCookieName || '', WafMode: row.WafMode || 'off', WafExcludeIds: row.WafExcludeIds || '', Upstreams: ruleUpstreams(row).map(({ Host, Port, Weight, IsBackup, IsActive }) => ({ Host, Port, Weight, IsBackup, IsActive })) }
+    ? { ...blankRule(), ...row, certificate: undefined, LbCookieName: row.LbCookieName || '', WafMode: row.WafMode || 'off', WafExcludeIds: row.WafExcludeIds || '', IpAccessMode: row.IpAccessMode || 'off', IpAccessList: row.IpAccessList || '', Upstreams: ruleUpstreams(row).map(({ Host, Port, Weight, IsBackup, IsActive }) => ({ Host, Port, Weight, IsBackup, IsActive })) }
     : blankRule();
   ruleDlg.visible = true;
 }
@@ -981,6 +1020,13 @@ onMounted(() => {
               </el-tooltip>
             </template>
           </el-table-column>
+          <el-table-column label="IP 限制" width="100" align="center">
+            <template #default="{ row }">
+              <el-tooltip :content="ipTag(row).tip" :disabled="!ipTag(row).tip" placement="top">
+                <el-tag size="small" :type="ipTag(row).type" :effect="(row.IpAccessMode || 'off') !== 'off' ? 'dark' : 'light'">{{ ipTag(row).text }}</el-tag>
+              </el-tooltip>
+            </template>
+          </el-table-column>
           <el-table-column label="啟用" width="80" align="center">
             <template #default="{ row }"><el-switch :model-value="row.IsActive" size="small" @change="(v) => quickToggle(row, 'IsActive', v)" /></template>
           </el-table-column>
@@ -1129,6 +1175,46 @@ onMounted(() => {
             </el-descriptions>
             <div class="form-hint" style="margin-top: 10px">
               建議導入順序：總開關開啟 → 網域先設「僅偵測」並部署 → 觀察 1–2 週，在「檢視 Nginx Log」→「WAF 事件」選該網域找出誤判（兩台節點都要看），把規則 ID 加入排除 → 再改「阻擋」。
+            </div>
+          </el-card>
+        </div>
+      </el-tab-pane>
+
+      <!-- ============ IP 存取控制 ============ -->
+      <el-tab-pane name="ip">
+        <template #label><span class="tab-label"><el-icon><CircleClose /></el-icon>IP 存取控制</span></template>
+        <div class="waf-page">
+          <el-alert v-if="ipCfg.missingTable" type="error" :closable="false" show-icon
+                    title="資料庫尚未建立 IP 存取控制資料表，請先執行 database/schema.sql" />
+          <el-card shadow="never" class="waf-card">
+            <template #header><b>全域黑名單</b><span class="hint">清單內的 IP / 網段連任何網域都回 403</span></template>
+            <el-input v-model="ipForm.BlockList" type="textarea" :rows="12" class="mono"
+                      :placeholder="'一行一筆，「#」後面是備註，例如：\n203.0.113.25        # 2026-11 大量掃描\n198.51.100.0/24     # 攻擊來源網段\n2001:db8::/32'" />
+            <div class="form-hint">
+              支援 IPv4 / IPv6 單一位址或網段（CIDR），最多 {{ ipCfg.limits?.global || 2000 }} 筆；重複的會自動去除，網段會整理成網路位址（例 120.96.1.77/24 → 120.96.1.0/24）。
+              不接受 0.0.0.0/0 這類代表全部位址的寫法。<code>/f5-health-check</code> 不受影響。
+            </div>
+            <div style="margin-top: 10px">
+              <el-button type="primary" :loading="ipSaving" :disabled="!ipDirty" @click="saveIp">儲存黑名單</el-button>
+              <span class="hint">目前 {{ ipCfg.blockCount || 0 }} 筆</span>
+              <span v-if="ipCfg.UpdatedAt && ipCfg.UpdatedBy" class="hint">最後修改：{{ fmt(ipCfg.UpdatedAt) }}（{{ ipCfg.UpdatedBy }}）</span>
+            </div>
+          </el-card>
+          <el-card shadow="never" class="waf-card">
+            <template #header><b>說明</b></template>
+            <el-descriptions :column="1" border size="small">
+              <el-descriptions-item label="全域黑名單">
+                <el-tag :type="ipCfg.blockCount ? 'danger' : 'info'">{{ ipCfg.blockCount ? `${ipCfg.blockCount} 筆` : '未設定' }}</el-tag>
+              </el-descriptions-item>
+              <el-descriptions-item label="網域設定">
+                只允許 <b>{{ ipCfg.ruleCounts?.allow || 0 }}</b> 個、拒絕 <b>{{ ipCfg.ruleCounts?.deny || 0 }}</b> 個（只計啟用中的規則）
+              </el-descriptions-item>
+            </el-descriptions>
+            <div class="form-hint" style="margin-top: 10px">
+              <b>判斷順序</b>：全域黑名單 → 網域的「只允許 / 拒絕」清單 → WAF → 轉送後端。被擋的請求回 403 頁面（顯示對方 IP），不會進 WAF、也不會送到後端。<br>
+              <b>網域設定</b>：在「網域對照規則」的編輯視窗設定 不限制 / 只允許 / 拒絕 與清單。<br>
+              <b>來源 IP</b>：經 F5 進來的連線以 PROXY protocol 取得真實 IP；被擋的紀錄可在「檢視 Nginx Log」的 access.log 搜尋 IP 或 <code> 403 </code>。<br>
+              儲存後需按「一鍵同步部署」才會生效。
             </div>
           </el-card>
         </div>
@@ -1521,6 +1607,20 @@ onMounted(() => {
         <el-form-item v-if="ruleDlg.form.WafMode !== 'off'" label="WAF 排除規則" prop="WafExcludeIds">
           <el-input v-model="ruleDlg.form.WafExcludeIds" placeholder="例：942100, 920350（只能填數字規則 ID，逗號分隔）" />
           <div class="form-hint">被誤擋時，把 WAF 事件中的規則 ID 填在這裡，這個網域就不再套用該規則。</div>
+        </el-form-item>
+        <el-form-item label="IP 存取控制">
+          <el-radio-group v-model="ruleDlg.form.IpAccessMode">
+            <el-radio-button v-for="(m, k) in IP_MODE" :key="k" :value="k">{{ m.text }}</el-radio-button>
+          </el-radio-group>
+          <div class="form-hint">{{ IP_MODE[ruleDlg.form.IpAccessMode].hint }}</div>
+        </el-form-item>
+        <el-form-item v-if="ruleDlg.form.IpAccessMode !== 'off'" :label="ruleDlg.form.IpAccessMode === 'allow' ? '允許的 IP' : '拒絕的 IP'" prop="IpAccessList">
+          <el-input v-model="ruleDlg.form.IpAccessList" type="textarea" :rows="5" class="mono"
+                    :placeholder="'一行一筆，「#」後面是備註，例如：\n120.96.0.0/16    # 校內\n203.0.113.25     # 合作廠商'" />
+          <div class="form-hint">
+            IPv4 / IPv6 位址或網段，最多 {{ ipCfg.limits?.rule || 200 }} 筆（目前 {{ ipListCount(ruleDlg.form.IpAccessList) }} 筆）。
+            <template v-if="ruleDlg.form.IpAccessMode === 'allow'"><b class="warn-text">只允許模式下，沒列入的 IP（包含你自己）都會被擋，請確認清單已包含需要連線的網段。</b></template>
+          </div>
         </el-form-item>
         <el-form-item label="自訂 Nginx 語法">
           <el-input v-model="ruleDlg.form.CustomNginxSnippet" type="textarea" :rows="5" class="mono"

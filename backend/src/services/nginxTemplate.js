@@ -13,6 +13,7 @@
  */
 const config = require('../config');
 const waf = require('./wafService');
+const ipAccess = require('./ipAccessService');
 
 const DOMAIN_RE = /^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 const HOST_RE = /^[A-Za-z0-9]([A-Za-z0-9.-]{0,253}[A-Za-z0-9])?$/;
@@ -62,6 +63,7 @@ function validateRule(r) {
   if (!r.CertificateId) errs.push('必須綁定 SSL 憑證');
   if (!SIZE_RE.test(String(r.ClientMaxBodySize || ''))) errs.push('上傳檔案上限格式不正確（例：50M、1G、0 代表不限制）');
   errs.push(...waf.validateRuleWaf(r));
+  errs.push(...ipAccess.validateRuleIp(r));
   const snippet = r.CustomNginxSnippet || '';
   if (snippet) {
     if (snippet.length > 20000) errs.push('自訂 Nginx 語法過長（上限 20000 字元）');
@@ -253,6 +255,16 @@ const backendDownHtml = (domain, code) => shibaPage({
   en: 'The service is temporarily unavailable. Please try again later.',
 });
 
+/** 403：來源 IP 被 IP 存取控制拒絕；IP_MARK 會在 returnHtml 換成 $remote_addr（真實來源 IP） */
+const IP_MARK = '@@CLIENT_IP@@';
+const ipDeniedHtml = (domain) => shibaPage({
+  code: '403', domain, title: '無法存取這個網站',
+  sub: '柴犬拿著放大鏡核對了來源位址，這個位址目前沒有存取權限…',
+  codeText: `HTTP 403 · 您的 IP：${IP_MARK}`,
+  msg: '您目前的網路位置無法存取此網站；若您認為這是錯誤，請將上方 IP 提供給網站管理者。',
+  en: 'Access to this site is not allowed from your network address.',
+});
+
 /**
  * 產生回傳整頁 HTML 的 nginx 指令。
  * nginx 單一參數上限 4096 bytes（超過會出現 "too long parameter"），頁面約 5 KB，
@@ -260,8 +272,7 @@ const backendDownHtml = (domain, code) => shibaPage({
  * 同一請求只會進入一個 location，不同 location 共用變數名稱不會互相影響。
  */
 const PAGE_CHUNK_BYTES = 3000;
-function returnHtml(code, html) {
-  const safe = safeNginxString(html);
+function chunkText(safe) {
   const chunks = [];
   let cur = '';
   for (const ch of safe) { // 以字元為單位切，不會切斷 UTF-8 中文字
@@ -269,11 +280,20 @@ function returnHtml(code, html) {
     cur += ch;
   }
   if (cur) chunks.push(cur);
-  if (chunks.length === 1) return [`return ${code} '${chunks[0]}';`];
-  return [
-    ...chunks.map((c, i) => `set $page_part${i} '${c}';`),
-    `return ${code} "${chunks.map((_, i) => `$page_part${i}`).join('')}";`,
-  ];
+  return chunks;
+}
+function returnHtml(code, html) {
+  // HTML 中的 IP_MARK 換成 nginx 變數 $remote_addr（只會是 IP 字元）；其餘內容維持單引號字串、不被 nginx 解析
+  const parts = html.split(IP_MARK).map((p) => chunkText(safeNginxString(p)));
+  if (parts.length === 1 && parts[0].length === 1) return [`return ${code} '${parts[0][0]}';`];
+  const sets = [];
+  const refs = [];
+  let n = 0;
+  parts.forEach((chunks, pi) => {
+    if (pi > 0) refs.push('$remote_addr');
+    chunks.forEach((c) => { sets.push(`set $page_part${n} '${c}';`); refs.push(`$page_part${n}`); n += 1; });
+  });
+  return [...sets, `return ${code} "${refs.join('')}";`];
 }
 
 /** 放進 nginx 單引號字串前的最後防線：不可含 ' $ \ 或換行 */
@@ -311,7 +331,9 @@ function ppRealIp() {
 
 /**
  * @param {object} rule
- * @param {{ waf?: object }} [opts] waf = WAF 全域設定（WafSettings）；未提供或總開關關閉時不產生 WAF 指令
+ * @param {{ waf?: object, ipBlock?: boolean }} [opts]
+ *   waf = WAF 全域設定（WafSettings）；未提供或總開關關閉時不產生 WAF 指令
+ *   ipBlock = 本次部署是否有全域 IP 黑名單（_ip_blocklist.conf 定義 $npm_ip_blocked）
  */
 function renderConf(rule, opts = {}) {
   const errs = validateRule(rule);
@@ -337,6 +359,20 @@ function renderConf(rule, opts = {}) {
   const connVar = `$conn_upgrade_r${rule.Id || 0}`;
   const wafLines = waf.serverWafLines(rule, opts.waf);
   const wafOn = wafLines.length > 0;
+  const ipLines = ipAccess.serverIpLines(rule, !!opts.ipBlock);
+  const ipOn = ipLines.length > 0;
+  const ipAcl = ipAccess.ruleAcl(rule);
+  // IP 被拒絕時 rewrite 到這個 internal location，回 403 頁面（不經過 WAF、不送後端）
+  const ipDeniedLocation = [
+    `location = ${ipAccess.DENIED_URI} {`,
+    '    internal;',
+    ...(wafOn ? ['    modsecurity off;'] : []),
+    '    default_type text/html;',
+    '    charset utf-8;',
+    '    add_header Cache-Control "no-store" always;',
+    ...returnHtml('403', ipDeniedHtml(domain)).map((l) => `    ${l}`),
+    '}',
+  ].join('\n');
 
   const healthLocation = [
     'location = /f5-health-check {',
@@ -398,6 +434,7 @@ function renderConf(rule, opts = {}) {
   out.push(`# Rule   : #${rule.Id || '-'}  →  ${memberText}${rule.IsMaintenance ? '   [MAINTENANCE MODE]' : ''}`);
   out.push(`# LB     : ${method}${method === 'cookie' ? ` (cookie ${rule.LbCookieName})` : ''}`);
   if (wafOn) out.push(`# WAF    : ${waf.WAF_MODE_LABEL[rule.WafMode]}`);
+  if (ipOn) out.push(`# IP ACL : ${[opts.ipBlock && '全域黑名單', ipAcl && `${ipAccess.MODE_LABEL[ipAcl.mode]} ${ipAcl.entries.length} 筆`].filter(Boolean).join(' + ')}`);
   out.push(`# Remark :${String(rule.Remark || '').replace(/[\r\n]+/g, ' ')}`);
   out.push('# =====================================================================');
   out.push('');
@@ -407,6 +444,8 @@ function renderConf(rule, opts = {}) {
     upstreamBlock.forEach((l) => out.push(l));
     out.push('');
   }
+
+  ipAccess.ruleGeoLines(rule).forEach((l) => out.push(l));
 
   if (ws && !rule.IsMaintenance) {
     out.push('# WebSocket：僅在帶 Upgrade 標頭時才送 Connection: upgrade，其餘維持 keepalive');
@@ -423,9 +462,11 @@ function renderConf(rule, opts = {}) {
   ppHttpListen().forEach((l) => out.push(l));
   out.push(`    server_name ${domain};`);
   ppRealIp().forEach((l) => out.push(l));
+  if (ipOn) { out.push(''); ipLines.forEach((l) => out.push(l)); }
   out.push('');
   out.push(indent(healthLocation));
   out.push('');
+  if (ipOn) { out.push(indent(ipDeniedLocation)); out.push(''); }
   if (rule.ForceHttps) {
     out.push('    location / {');
     out.push('        return 301 https://$host$request_uri;');
@@ -450,6 +491,7 @@ function renderConf(rule, opts = {}) {
   ppHttpsListen().forEach((l) => out.push(l));
   out.push(`    server_name ${domain};`);
   ppRealIp().forEach((l) => out.push(l));
+  if (ipOn) { out.push(''); ipLines.forEach((l) => out.push(l)); }
   out.push('');
   out.push(`    ssl_certificate     ${crt};`);
   out.push(`    ssl_certificate_key ${key};`);
@@ -464,6 +506,7 @@ function renderConf(rule, opts = {}) {
   out.push('');
   out.push(indent(healthLocation));
   out.push('');
+  if (ipOn) { out.push(indent(ipDeniedLocation)); out.push(''); }
   if (rule.CustomNginxSnippet && rule.CustomNginxSnippet.trim()) {
     out.push('    # ---- 自訂 Nginx 語法 (CustomNginxSnippet) ----');
     out.push(indent(rule.CustomNginxSnippet.trim()));

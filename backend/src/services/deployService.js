@@ -19,6 +19,8 @@ const { validateRule, renderConf, renderDefaultConf, DEFAULT_CONF_NAME, confFile
 const backendProbe = require('./backendProbe');
 const waf = require('./wafService');
 const wafSettings = require('./wafSettingsService');
+const ipAccess = require('./ipAccessService');
+const ipSettings = require('./ipAccessSettingsService');
 
 const bus = new EventEmitter();
 bus.setMaxListeners(100);
@@ -93,6 +95,9 @@ async function buildFileSet(log) {
   let defaultCert = null; // 預設站台 443 使用的憑證
   const wafCfg = await wafSettings.get();
   const wafDomains = [];
+  const blockList = await ipSettings.blockEntries();
+  const ipBlock = blockList.length > 0;
+  const aclDomains = [];
   for (const r of rules) {
     const p = r.get({ plain: true });
     const errs = validateRule(p);
@@ -102,8 +107,10 @@ async function buildFileSet(log) {
       continue;
     }
     if (new Date(p.certificate.ValidTo) < new Date()) log('warn', `規則 ${p.DomainName} 綁定的憑證「${p.certificate.Alias}」已過期`);
-    confs.set(confFileName(p.DomainName), renderConf(p, { waf: wafCfg }));
+    confs.set(confFileName(p.DomainName), renderConf(p, { waf: wafCfg, ipBlock }));
     if (waf.ruleWafActive(p, wafCfg)) wafDomains.push(`${p.DomainName}（${waf.WAF_MODE_LABEL[p.WafMode]}）`);
+    const acl = ipAccess.ruleAcl(p);
+    if (acl) aclDomains.push(`${p.DomainName}（${ipAccess.MODE_LABEL[acl.mode]} ${acl.entries.length} 筆）`);
     if (!p.IsMaintenance) {
       upstreamsOf(p).filter((u) => u.IsActive !== false).forEach((u) => {
         const key = `${String(u.Host).toLowerCase()}:${u.Port}`;
@@ -127,6 +134,12 @@ async function buildFileSet(log) {
   } else if (!wafCfg.Enabled && rules.some((r) => (r.WafMode || 'off') !== 'off')) {
     log('warn', 'WAF 總開關關閉，網域規則上的 WAF 設定本次不會生效');
   }
+  // IP 存取控制：全域黑名單有項目才產生（網域設定檔會引用 $npm_ip_blocked）
+  if (ipBlock) {
+    confs.set(ipAccess.BLOCKLIST_CONF_NAME, ipAccess.renderBlocklistConf(blockList));
+    log('info', `全域 IP 黑名單：${blockList.length} 筆，套用到所有網域`);
+  }
+  if (aclDomains.length) log('info', `網域 IP 存取限制：${aclDomains.join('、')}`);
   log('info', `已產生 ${confs.size} 個設定檔、${certs.size} 張憑證`);
   return { confs, certs, backends, ruleCount: rules.length, wafUsed: wafDomains.length > 0 };
 }
