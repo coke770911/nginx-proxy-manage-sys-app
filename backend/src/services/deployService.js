@@ -17,6 +17,8 @@ const { ProxyNode, DomainRule, RuleUpstream, SslCertificate, DeployLog } = requi
 const { NodeSession } = require('./sshSession');
 const { validateRule, renderConf, renderDefaultConf, DEFAULT_CONF_NAME, confFileName, certRemotePaths, upstreamsOf } = require('./nginxTemplate');
 const backendProbe = require('./backendProbe');
+const waf = require('./wafService');
+const wafSettings = require('./wafSettingsService');
 
 const bus = new EventEmitter();
 bus.setMaxListeners(100);
@@ -89,6 +91,8 @@ async function buildFileSet(log) {
   const problems = [];
   const backends = new Map(); // host:port → { host, port, domains[] }（維護中的規則不轉發，不需檢查）
   let defaultCert = null; // 預設站台 443 使用的憑證
+  const wafCfg = await wafSettings.get();
+  const wafDomains = [];
   for (const r of rules) {
     const p = r.get({ plain: true });
     const errs = validateRule(p);
@@ -98,7 +102,8 @@ async function buildFileSet(log) {
       continue;
     }
     if (new Date(p.certificate.ValidTo) < new Date()) log('warn', `規則 ${p.DomainName} 綁定的憑證「${p.certificate.Alias}」已過期`);
-    confs.set(confFileName(p.DomainName), renderConf(p));
+    confs.set(confFileName(p.DomainName), renderConf(p, { waf: wafCfg }));
+    if (waf.ruleWafActive(p, wafCfg)) wafDomains.push(`${p.DomainName}（${waf.WAF_MODE_LABEL[p.WafMode]}）`);
     if (!p.IsMaintenance) {
       upstreamsOf(p).filter((u) => u.IsActive !== false).forEach((u) => {
         const key = `${String(u.Host).toLowerCase()}:${u.Port}`;
@@ -114,8 +119,16 @@ async function buildFileSet(log) {
   // 預設站台的 443 借用一張已部署、到期日最晚的憑證（以 IP 連線本來就會出現憑證名稱不符的警告）
   if (defaultCert) log('info', `預設站台（404 頁面）使用憑證「${defaultCert.Alias}」`);
   confs.set(DEFAULT_CONF_NAME, renderDefaultConf(defaultCert ? defaultCert.Id : null));
+  // WAF：有網域實際啟用才產生規則檔（總開關關閉或沒有網域開啟時，設定與未導入 WAF 前完全相同）
+  if (wafDomains.length) {
+    confs.set(waf.WAF_CONF_NAME, waf.renderWafConf());
+    confs.set(waf.WAF_RULES_NAME, waf.renderWafRules(wafCfg));
+    log('info', `WAF 已啟用（嚴格程度 ${wafCfg.ParanoiaLevel}、門檻 ${wafCfg.InboundThreshold}）：${wafDomains.join('、')}`);
+  } else if (!wafCfg.Enabled && rules.some((r) => (r.WafMode || 'off') !== 'off')) {
+    log('warn', 'WAF 總開關關閉，網域規則上的 WAF 設定本次不會生效');
+  }
   log('info', `已產生 ${confs.size} 個設定檔、${certs.size} 張憑證`);
-  return { confs, certs, backends, ruleCount: rules.length };
+  return { confs, certs, backends, ruleCount: rules.length, wafUsed: wafDomains.length > 0 };
 }
 
 /* ------------------------------------------------------------------ 階段 1 */
@@ -229,6 +242,22 @@ async function deploy({ triggeredBy = 'admin', triggerIp = null } = {}) {
       throw new DeployError('節點連線失敗，已中止部署（未變更任何節點）', {
         detail: connFail.map((x) => `[${x.session.name}] ${errText(x.error)}`).join('\n'),
       });
+    }
+
+    // ---- WAF 模組檢查：有網域開啟 WAF 時，所有節點都必須已安裝模組與 CRS，否則中止（尚未變更任何節點）
+    if (fileSet.wafUsed) {
+      const chk = await forAll(sessions, 'WAF 模組檢查', async (s) => {
+        const r = await s.exec(waf.WAF_CHECK_CMD, 15000);
+        const st = waf.parseWafCheck(r.stdout);
+        if (!st || !st.ready) throw new Error('尚未安裝 WAF 模組（libnginx-mod-http-modsecurity / modsecurity-crs），請先依操作手冊「WAF 模組安裝」在節點執行');
+        log('info', `WAF 模組已安裝，OWASP CRS ${st.crsVersion || '版本不明'}`, s.name);
+      }, ctx);
+      const bad = chk.filter((x) => !x.ok);
+      if (bad.length) {
+        throw new DeployError('有節點尚未安裝 WAF 模組，已中止部署（未變更任何節點）', {
+          detail: bad.map((x) => `[${x.session.name}] ${errText(x.error)}`).join('\n'),
+        });
+      }
     }
 
     // ---- 後端連線檢查：只提出警告，不阻擋部署（後端可能刻意尚未上線）

@@ -103,6 +103,14 @@ cat > /etc/logrotate.d/nginx <<'ROTATE'
 ROTATE
 logrotate -d /etc/logrotate.d/nginx >/dev/null 2>&1 || { echo "!! logrotate 設定檢查失敗"; exit 1; }
 
+echo "== 7d. WAF 模組（ModSecurity v3 + OWASP CRS；只安裝不啟用，由管理系統部署時開啟）=="
+apt-get -y install libnginx-mod-http-modsecurity modsecurity-crs
+for f in /usr/lib/nginx/modules/ngx_http_modsecurity_module.so /etc/nginx/modules-enabled/50-mod-http-modsecurity.conf /etc/nginx/unicode.mapping /usr/share/modsecurity-crs/rules/REQUEST-901-INITIALIZATION.conf; do
+  [ -e "$f" ] || { echo "!! WAF 安裝不完整，缺少 $f"; exit 1; }
+done
+nginx -t
+echo "   WAF 模組已安裝：CRS $(dpkg-query -W -f='${Version}' modsecurity-crs)"
+
 echo "== 8. SSH 加固 =="
 cat > /etc/ssh/sshd_config.d/10-hardening.conf <<'EOF'
 PermitRootLogin no

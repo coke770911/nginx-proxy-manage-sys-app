@@ -12,6 +12,7 @@
  *   legacy（nginx < 1.25.1，如 Ubuntu 24.04 的 1.24）→ `listen 443 ssl http2;`
  */
 const config = require('../config');
+const waf = require('./wafService');
 
 const DOMAIN_RE = /^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 const HOST_RE = /^[A-Za-z0-9]([A-Za-z0-9.-]{0,253}[A-Za-z0-9])?$/;
@@ -60,6 +61,7 @@ function validateRule(r) {
   if (method === 'cookie' && active.some((u) => u.IsBackup)) errs.push('「依 Cookie 固定」不能搭配備援機（nginx hash 不支援 backup）');
   if (!r.CertificateId) errs.push('必須綁定 SSL 憑證');
   if (!SIZE_RE.test(String(r.ClientMaxBodySize || ''))) errs.push('上傳檔案上限格式不正確（例：50M、1G、0 代表不限制）');
+  errs.push(...waf.validateRuleWaf(r));
   const snippet = r.CustomNginxSnippet || '';
   if (snippet) {
     if (snippet.length > 20000) errs.push('自訂 Nginx 語法過長（上限 20000 字元）');
@@ -307,7 +309,11 @@ function ppRealIp() {
   ];
 }
 
-function renderConf(rule) {
+/**
+ * @param {object} rule
+ * @param {{ waf?: object }} [opts] waf = WAF 全域設定（WafSettings）；未提供或總開關關閉時不產生 WAF 指令
+ */
+function renderConf(rule, opts = {}) {
   const errs = validateRule(rule);
   if (errs.length) throw new Error(`規則 ${rule.DomainName || '?'} 驗證失敗：${errs.join('；')}`);
 
@@ -329,10 +335,13 @@ function renderConf(rule) {
   const memberText = members.map((u) => `${u.Host}:${u.Port}${u.IsBackup ? '(備援)' : ''}`).join(', ');
   const { crt, key } = certRemotePaths(rule.CertificateId);
   const connVar = `$conn_upgrade_r${rule.Id || 0}`;
+  const wafLines = waf.serverWafLines(rule, opts.waf);
+  const wafOn = wafLines.length > 0;
 
   const healthLocation = [
     'location = /f5-health-check {',
     '    access_log off;',
+    ...(wafOn ? ['    modsecurity off;'] : []),
     '    default_type text/plain;',
     '    return 200 "OK\\n";',
     '}',
@@ -388,7 +397,8 @@ function renderConf(rule) {
   out.push(`# Domain : ${domain}`);
   out.push(`# Rule   : #${rule.Id || '-'}  →  ${memberText}${rule.IsMaintenance ? '   [MAINTENANCE MODE]' : ''}`);
   out.push(`# LB     : ${method}${method === 'cookie' ? ` (cookie ${rule.LbCookieName})` : ''}`);
-  out.push(`# Remark : ${String(rule.Remark || '').replace(/[\r\n]+/g, ' ')}`);
+  if (wafOn) out.push(`# WAF    : ${waf.WAF_MODE_LABEL[rule.WafMode]}`);
+  out.push(`# Remark :${String(rule.Remark || '').replace(/[\r\n]+/g, ' ')}`);
   out.push('# =====================================================================');
   out.push('');
 
@@ -422,6 +432,7 @@ function renderConf(rule) {
     out.push('    }');
   } else {
     out.push(indent(bodySize));
+    wafLines.forEach((l) => out.push(l));
     out.push('');
     out.push(indent(trafficLocation));
   }
@@ -449,6 +460,7 @@ function renderConf(rule) {
   out.push('    ssl_session_tickets off;');
   out.push('');
   out.push(indent(bodySize));
+  wafLines.forEach((l) => out.push(l));
   out.push('');
   out.push(indent(healthLocation));
   out.push('');

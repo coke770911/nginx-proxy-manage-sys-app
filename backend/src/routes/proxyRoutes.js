@@ -14,6 +14,8 @@ const backendProbe = require('../services/backendProbe');
 const ruleImport = require('../services/ruleImport');
 const nodeLog = require('../services/nodeLogService');
 const cutoverCheck = require('../services/cutoverCheck');
+const waf = require('../services/wafService');
+const wafSettings = require('../services/wafSettingsService');
 const config = require('../config');
 
 const router = express.Router();
@@ -196,6 +198,7 @@ router.delete('/certificates/:id', wrap(async (req, res) => {
 const RULE_FIELDS = [
   'DomainName', 'CertificateId', 'ForceHttps', 'EnableWebSocket',
   'ClientMaxBodySize', 'IsActive', 'IsMaintenance', 'CustomNginxSnippet', 'Remark', 'LbMethod', 'LbCookieName',
+  'WafMode', 'WafExcludeIds',
 ];
 const RULE_BOOLS = ['ForceHttps', 'EnableWebSocket', 'IsActive', 'IsMaintenance'];
 const UP_ORDER = [[{ model: RuleUpstream, as: 'Upstreams' }, 'SortOrder', 'ASC'], [{ model: RuleUpstream, as: 'Upstreams' }, 'Id', 'ASC']];
@@ -219,7 +222,15 @@ function normalizeRule(data) {
   if ('LbMethod' in out) out.LbMethod = String(out.LbMethod || 'round_robin').trim();
   if ('LbCookieName' in out) out.LbCookieName = String(out.LbCookieName || '').trim() || null;
   if (out.LbMethod && out.LbMethod !== 'cookie') out.LbCookieName = null;
+  if ('WafMode' in out) out.WafMode = String(out.WafMode || 'off').trim();
+  if ('WafExcludeIds' in out) out.WafExcludeIds = String(out.WafExcludeIds || '').trim() || null;
   return out;
+}
+
+/** 驗證通過後，排除規則 ID 整理成「942100,942200」格式再存 */
+function finalizeRule(data) {
+  if ('WafExcludeIds' in data) data.WafExcludeIds = waf.normalizeExcludeIds(data.WafExcludeIds);
+  return data;
 }
 
 /** 前端送來的後端清單 → 乾淨陣列；未提供時回 undefined（代表不變更） */
@@ -271,6 +282,7 @@ router.post('/rules', wrap(async (req, res) => {
   const ups = normalizeUpstreams(req.body || {});
   if (!ups) throw new HttpError(400, '至少要設定一台後端主機');
   await checkRule({ ...data, Upstreams: ups });
+  finalizeRule(data);
   const created = await sequelize.transaction(async (t) => {
     const rule = await DomainRule.create({ ...data, ...primaryOf(ups) }, { transaction: t });
     await replaceUpstreams(rule.Id, ups, t);
@@ -288,6 +300,7 @@ router.put('/rules/:id', wrap(async (req, res) => {
   const data = normalizeRule(pick(req.body, RULE_FIELDS));
   const ups = normalizeUpstreams(req.body || {});
   await checkRule({ ...before, ...data, Upstreams: ups || beforeUps });
+  finalizeRule(data);
   // 只改後端主機時規則本身欄位不變，仍要更新 UpdatedAt（清單「最後更動」與「尚未部署」提示依此判斷）
   const upsChanged = !!ups && upText(ups) !== upText(beforeUps);
   await sequelize.transaction(async (t) => {
@@ -459,7 +472,24 @@ router.post('/rules/cutover-check', wrap(async (req, res) => {
 router.get('/rules/:id/preview', wrap(async (req, res) => {
   const rule = await loadRule(req.params.id);
   if (!rule) throw new HttpError(404, '規則不存在');
-  res.type('text/plain; charset=utf-8').send(renderConf(rule.get({ plain: true })));
+  res.type('text/plain; charset=utf-8').send(renderConf(rule.get({ plain: true }), { waf: await wafSettings.get() }));
+}));
+
+/* =============================================================== WAF 全域設定 */
+router.get('/waf/settings', wrap(async (req, res) => {
+  const s = await wafSettings.get();
+  const counts = { detect: 0, block: 0 };
+  if (!s.missingTable) {
+    (await DomainRule.findAll({ where: { IsActive: true }, attributes: ['WafMode'] })).forEach((r) => { if (counts[r.WafMode] !== undefined) counts[r.WafMode] += 1; });
+  }
+  res.json({ ...s, ruleCounts: counts });
+}));
+
+router.put('/waf/settings', wrap(async (req, res) => {
+  const { before, after } = await wafSettings.update(req.body || {}, req.user?.username);
+  const pickS = (x) => ({ Enabled: x.Enabled, ParanoiaLevel: x.ParanoiaLevel, InboundThreshold: x.InboundThreshold });
+  await audit.record(req, { action: 'UPDATE', targetType: 'WAF', targetId: 1, targetName: 'WAF 全域設定', detail: audit.diff(pickS(before), pickS(after)) });
+  res.json(after);
 }));
 
 /* =============================================================== 部署 */

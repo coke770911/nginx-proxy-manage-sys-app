@@ -142,6 +142,10 @@ sudo fail2ban-client get sshd ignoreip           # 白名單
 - 讀不到（`Permission denied`）→ 第 3 節重跑腳本（步驟 7b / 7c 會補）。
 - 磁碟：`df -h /var/log`；一年的壓縮 Log 量通常不大，若空間不足再調 `rotate`。
 
+## 6b. WAF 模組
+
+既有節點補裝、確認、誤判處理見 `nginx-waf` skill 與 `docs/WAF防護操作手冊.md`。重跑第 3 節腳本也會補裝（步驟 7d）。
+
 ## 7. 節點連不上 / 時好時壞
 
 ### 7-1 先分辨症狀（Claude 在管理主機執行）

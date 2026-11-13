@@ -83,7 +83,7 @@ Test-NetConnection <IP> -Port 22
 
 讀取本 skill 目錄下的 `node-setup.sh`，把 `__PUBKEY__` 換成上一步的公鑰、`__SSH_ALLOW_NETS__` 換成第 0 步的 SSH 允許網段（空白分隔 CIDR；使用者說 `x.x.33.*` 就寫 `x.x.33.0/24`），組成下列貼上區塊交給使用者，在已登入的 SSH 視窗整段貼上（會要一次 sudo 密碼）。替換後的內容只在對話中提供，不寫回版控檔案。
 
-腳本除了初始化，也完成安全加固：ufw 的 SSH 只開放允許網段（先加網段規則再刪 `OpenSSH` 全開規則）、SSH 禁 root / 關 X11 / `MaxAuthTries 3` / `AllowUsers sysadmin deployer`、fail2ban（允許網段列白名單）、`server_tokens off`、自動安全更新、sysctl、停用 ModemManager/udisks2/upower；另外以 ACL 讓 deployer 唯讀 `/var/log/nginx`（管理介面「檢視 Log」用），並設定 logrotate 每天切檔、保留 365 天。sysadmin 有 `authorized_keys` 時才關閉密碼登入。**既有節點重跑同一腳本即可補上加固**（可重複執行）。若 apt 出現紫色「Daemons using outdated libraries」對話框，請使用者按 Enter。
+腳本除了初始化，也完成安全加固：ufw 的 SSH 只開放允許網段（先加網段規則再刪 `OpenSSH` 全開規則）、SSH 禁 root / 關 X11 / `MaxAuthTries 3` / `AllowUsers sysadmin deployer`、fail2ban（允許網段列白名單）、`server_tokens off`、自動安全更新、sysctl、停用 ModemManager/udisks2/upower；另外以 ACL 讓 deployer 唯讀 `/var/log/nginx`（管理介面「檢視 Log」用），並設定 logrotate 每天切檔、保留 365 天；最後安裝 WAF 模組（步驟 7d：`libnginx-mod-http-modsecurity` + `modsecurity-crs`，只安裝不啟用，網站行為不變；開啟方式見 `nginx-waf` skill）。sysadmin 有 `authorized_keys` 時才關閉密碼登入。**既有節點重跑同一腳本即可補上加固**（可重複執行）。若 apt 出現紫色「Daemons using outdated libraries」對話框，請使用者按 Enter。
 
 ```bash
 cat > ~/node-setup.sh <<'EOF'
@@ -115,6 +115,12 @@ curl -sI http://<IP>/ | grep -i '^server'
 
 ```bash
 tr -d '\r' < .claude/skills/nginx-node-ops/node-audit.sh | ssh -i C:/nginx-ha-manager/keys/deployer_ed25519 -o BatchMode=yes deployer@<IP> 'bash -s'
+```
+
+WAF 模組確認（應輸出 `WAF:1:3.3.x`）：
+
+```bash
+ssh -i C:/nginx-ha-manager/keys/deployer_ed25519 -o BatchMode=yes deployer@<IP> "echo WAF:$(test -e /usr/lib/nginx/modules/ngx_http_modsecurity_module.so && test -d /usr/share/modsecurity-crs/rules && echo 1 || echo 0):$(dpkg-query -W -f='${Version}' modsecurity-crs 2>/dev/null)"
 ```
 
 對照 `nginx-node-ops` 第 2 節的表格判讀；記下網卡 MAC，日後排查 IP 衝突用。deployer 讀不到 ufw 規則，請使用者核對腳本輸出的 `ufw status numbered`：22/tcp 只對允許網段 ALLOW，且已無 `OpenSSH ... Anywhere`。
@@ -149,7 +155,8 @@ tr -d '\r' < .claude/skills/nginx-node-ops/node-audit.sh | ssh -i C:/nginx-ha-ma
 
 告訴使用者：
 
-- 節點 IP、Nginx 版本、指紋已比對一致、健康檢查結果、加固項目驗證結果。
+- 節點 IP、Nginx 版本、指紋已比對一致、健康檢查結果、加固項目驗證結果、WAF 模組是否已安裝。
+- 若系統已有網域開啟 WAF，新節點一定要裝好 WAF 模組，否則部署會在寫入前中止。
 - 若 sysadmin 仍是密碼登入，說明目前由網段限制 + fail2ban 防護；設好 sysadmin 金鑰後重跑腳本即會關閉密碼登入。
 - 允許網段以外（家中、其他 VPN 網段）將無法 SSH，只能走 vSphere console；需要時在 ufw 加網段或重跑腳本。
 - 待辦：在 vSphere 取消 CD/DVD 的 Connected；上線前做一次故意寫錯自訂語法的部署確認會回滾；建立 VM 快照。

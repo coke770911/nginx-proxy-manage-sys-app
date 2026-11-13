@@ -12,6 +12,7 @@ const { ProxyNode, DomainRule, RuleUpstream } = require('../models');
 const { NodeSession } = require('./sshSession');
 const deployService = require('./deployService');
 const backendProbe = require('./backendProbe');
+const { WAF_CHECK_CMD, parseWafCheck } = require('./wafService');
 
 const BACKEND_TIMEOUT = 3;
 const MAX_BACKENDS = 300;
@@ -39,6 +40,7 @@ const STATS_CMD = [
   'cat /proc/loadavg',
   'nproc',
   'df -Pk / 2>/dev/null | tail -n1',
+  WAF_CHECK_CMD, // WAF 模組是否已安裝（唯讀檢查檔案）
 ].join('; ');
 
 const stats = new Map(); // nodeId -> { cpu, mem, swap, disk, load, cores, at }
@@ -74,7 +76,7 @@ function parseStats(out) {
     const avail = Number(p[3]) * 1024;
     disk = { mount: '/', total, used, free: avail, percent: pct(used, used + avail) };
   }
-  return { cpu, mem, swap, disk, load, cores };
+  return { cpu, mem, swap, disk, load, cores, waf: parseWafCheck(out) };
 }
 
 /** 記錄某節點對後端的測試結果；results 為 null 表示該節點這輪無法測試（清除舊結果，避免顯示過期燈號） */

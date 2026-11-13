@@ -35,7 +35,12 @@
 - 後端故障自動排除（連續 3 次失敗暫停 10 秒），請求失敗時自動改送下一台。
 - 前端由 F5 分流到兩台 Nginx 節點，形成「F5 → 雙 Nginx → 多台後端」兩層高可用架構。
 
-詳細設定請見下方「負載平衡」「網域規則匯入 / 匯出」等章節。
+### 4. WAF 網站防火牆
+
+- 節點上的 ModSecurity v3 + OWASP 核心規則集（CRS），在 Nginx 解開 SSL 後檢查請求，擋 SQL 注入、XSS、路徑穿越、掃描器等攻擊。
+- 每個網域可設 關閉 / 僅偵測 / 阻擋，並可排除誤判的規則 ID；全域設定嚴格程度與阻擋門檻，都在管理介面完成、一鍵部署。
+
+詳細設定請見下方「負載平衡」「網域規則匯入 / 匯出」「WAF 網站防火牆」等章節。
 
 ## 目錄結構
 
@@ -45,12 +50,12 @@
 ├─ scripts/                     version.js 版號規則、release.js 發佈腳本
 ├─ .githooks/                   pre-commit（檢查 README）、pre-push（檢查版號 tag）
 ├─ ecosystem.config.js          PM2 設定檔（單一執行個體，Log 輸出到 logs/）
-├─ database/schema.sql          SQL Server DDL（7 張資料表，可重複執行並自動轉換舊資料）+ 兩台節點範例資料
+├─ database/schema.sql          SQL Server DDL（8 張資料表，可重複執行並自動轉換舊資料）+ 兩台節點範例資料
 ├─ backend/                     Node.js + Express + Sequelize(mssql) + JWT
 │  ├─ public/                   前端編譯產物（frontend npm run build 自動輸出，不進版控）
 │  └─ src/
 │     ├─ app.js                 進入點（JWT 驗證、靜態檔、健康檢查排程，單一 port）
-│     ├─ config/ db/ models/    設定、連線、7 張資料表 Model
+│     ├─ config/ db/ models/    設定、連線、8 張資料表 Model
 │     ├─ routes/authRoutes.js   登入 API、JWT 驗證中介層、登入失敗鎖定
 │     ├─ routes/proxyRoutes.js  REST API + SSE 即時 Log + 操作紀錄查詢
 │     ├─ routes/accountRoutes.js 帳號管理 API
@@ -65,9 +70,13 @@
 │        ├─ backendProbe.js     從節點測試後端連線（TCP + HTTP 狀態碼）
 │        ├─ cutoverCheck.js     切換前檢查：模擬 DNS 改指 F5 VIP 後的連線結果（唯讀）
 │        ├─ nodeLogService.js   讀取節點 Nginx access / error Log（唯讀、白名單）
+│        ├─ wafService.js       WAF 設定產生（ModSecurity 主規則檔、各網域開關）與白名單驗證、節點模組檢查
+│        ├─ wafSettingsService.js WAF 全域設定讀寫（WafSettings）
 │        ├─ ruleImport.js       網域規則 CSV 匯入解析、格式檢查、重複比對與匯出
 │        └─ healthService.js    節點燈號（SSH + nginx active）與 CPU / RAM / 硬碟使用率
-└─ frontend/                    Vue 3 + Vite + Element Plus（views/Login.vue、views/Dashboard.vue）
+├─ frontend/                    Vue 3 + Vite + Element Plus（views/Login.vue、views/Dashboard.vue）
+├─ docs/                        節點建置操作手冊、WAF 防護操作手冊
+└─ .claude/skills/              Claude 技能：deploy-nginx-node（建節點）、nginx-node-ops（節點維運）、nginx-waf（WAF 安裝與維運）
 ```
 
 ## 快速開始
@@ -367,6 +376,41 @@ port_in_redirect off;                # 轉址不帶出 8080 / 8443
 - **順序**：先部署（節點開始監聽 8080 / 8443）並開防火牆，再改 F5 pool；回退時反過來，F5 pool 改回 80 / 443 後再清空 `PROXY_PROTOCOL_FROM`。
 - **後端系統**仍需設定「信任節點 IP、改讀 `X-Real-IP`」，例如 Apache `mod_remoteip`、Tomcat `RemoteIpValve`、IIS 記錄欄位加 `X-Real-IP`，才會在自己的 log / 程式中看到真實 IP。
 
+## WAF 網站防火牆（ModSecurity v3 + OWASP CRS）
+
+完整步驟見 [`docs/WAF防護操作手冊.md`](docs/WAF防護操作手冊.md)，Claude 操作流程見 `.claude/skills/nginx-waf/`。
+
+**1. 節點安裝模組（sysadmin，每台一次）**：新節點的初始化腳本（步驟 7d）已包含；既有節點執行
+
+```bash
+sudo apt-get update && sudo apt-get -y install libnginx-mod-http-modsecurity modsecurity-crs
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+只載入模組、不檢查任何請求，網站不受影響。節點卡片會顯示「WAF 模組：已安裝（CRS 3.3.x）」。
+
+**2. 管理介面設定**
+
+| 位置 | 設定 |
+|---|---|
+| 「WAF 防護」分頁 | 總開關、嚴格程度（1 標準～4 極嚴格，建議 1）、阻擋門檻分數（預設 5）；右側顯示各節點模組狀態與各模式的網域數 |
+| 網域規則編輯視窗 | WAF 防護：關閉（預設）/ 僅偵測 / 阻擋；WAF 排除規則：誤判的規則 ID（6–7 位數字，逗號分隔） |
+| 規則清單「WAF」欄 | 各網域狀態；總開關關閉時以灰色標示「尚未生效」 |
+
+**3. 部署行為**
+
+- 總開關開啟且至少一個網域不是「關閉」時，才在 `sites-managed/` 產生 `_waf.conf`（http 層載入一次規則）與 `_waf_main.rules`（基本設定、CRS 設定、`Include` CRS 規則）；各網域 server 區塊加上 `modsecurity on;` 與 `SecRuleEngine On / DetectionOnly`、`SecRuleRemoveById`。其他情況設定與未導入 WAF 前完全相同。
+- 有網域開啟 WAF 時，部署連線後會先檢查所有節點是否已安裝模組，**任一節點未安裝即在寫入前中止**；設定檔照樣經過「全部節點 `nginx -t` 通過才 reload、失敗回滾」。
+- `/f5-health-check` 與維護中頁面不經過 WAF。
+- 大型上傳只檢查前段（`SecRequestBodyLimitAction ProcessPartial`），不會因檔案大而被擋。
+- WAF 事件寫入 Nginx `error.log`（「檢視 Nginx Log」搜尋 `ModSecurity`）；**audit log 關閉**，避免記下 POST 內容與密碼。
+
+**4. 安全設計**：管理介面只開放模式三選一、數字規則 ID、嚴格程度 1–4、門檻 1–100，全部經白名單驗證；不提供自訂 ModSecurity 規則（規則語法可執行外部程式）。deployer 不需新增任何 sudo 權限。WAF 設定變更寫入操作紀錄（類別「WAF 設定」）。
+
+**5. 建議導入順序**：兩台裝好模組 → 開總開關 → 測試網域「僅偵測」驗證 → 全部網域「僅偵測」觀察 1–2 週、排除誤判 → 逐站改「阻擋」。
+
+**資料庫**：升級時重新執行 `database/schema.sql`（可重複執行），會在 `DomainRules` 加入 `WafMode`、`WafExcludeIds` 並建立 `WafSettings`。未執行前 WAF 視為關閉，不影響部署。
+
 ## Ubuntu 節點事前準備（兩台皆需）
 
 ```bash
@@ -388,6 +432,7 @@ sudo chmod 750 /etc/nginx/ssl
 - **SSH**：禁止 root 登入、關閉 X11、`MaxAuthTries 3`、`AllowUsers sysadmin deployer`；sysadmin 已設定金鑰時才關閉密碼登入。
 - **fail2ban**：防 SSH 暴力破解，允許網段列入白名單。
 - **其他**：`server_tokens off`（回應標頭不顯示 Nginx 版本）、自動安全更新、sysctl 網路參數、停用不需要的服務。
+- **WAF 模組**：安裝 ModSecurity 與 OWASP CRS（只安裝不啟用，見「WAF 網站防火牆」）。
 
 ### 節點日常維運（Claude 技能）
 
@@ -400,6 +445,7 @@ sudo chmod 750 /etc/nginx/ssl
   - SSH 允許網段與 fail2ban 管理。
   - Nginx Log 權限。
   - 節點連不上或時好時壞的排查：以 `arping -0` 確認 IP 衝突，並在 vCenter 以 MAC 欄位篩選找出衝突的 VM，只查詢、不修改 VM。
+- `.claude/skills/nginx-waf/`：WAF 模組安裝與確認、開啟與驗證、誤判處理（排除規則 ID）、故障排查。
 
 手動執行稽核：
 

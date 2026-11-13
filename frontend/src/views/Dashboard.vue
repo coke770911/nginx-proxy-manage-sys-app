@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection, Download, Document, Aim } from '@element-plus/icons-vue';
+import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection, Download, Document, Aim, Lock } from '@element-plus/icons-vue';
 import api, { eventsUrl, session, logout } from '../api';
 
 /* ------------------------------------------------------------------ 資料 */
@@ -19,6 +19,7 @@ async function loadAll() {
     [nodes.value, certs.value, rules.value, logs.value] = await Promise.all([
       api.get('/nodes'), api.get('/certificates'), api.get('/rules'), api.get('/deploy/logs'),
     ]);
+    loadWaf();
   } catch (e) {
     ElMessage.error(e.message);
   } finally {
@@ -125,7 +126,7 @@ const AUDIT_ACTION = {
   DEPLOY: { type: 'info', text: '部署' },
   CUTOVER_CHECK: { type: 'info', text: '切換前檢查' },
 };
-const AUDIT_TARGET = { AUTH: '登入', RULE: '網域規則', CERT: 'SSL 憑證', NODE: 'Nginx 節點', DEPLOY: '部署', ACCOUNT: '帳號管理' };
+const AUDIT_TARGET = { AUTH: '登入', RULE: '網域規則', CERT: 'SSL 憑證', NODE: 'Nginx 節點', DEPLOY: '部署', ACCOUNT: '帳號管理', WAF: 'WAF 設定' };
 const audit = reactive({ q: '', action: '', targetType: '', range: null, page: 1, pageSize: 50, total: 0, rows: [], loading: false });
 
 async function loadAudit(resetPage = false) {
@@ -153,6 +154,7 @@ const FIELD_LABEL = {
   SshUser: 'SSH 帳號', SshKeyPath: '私鑰路徑', HostKeySha256: '主機指紋', Alias: '別名', SanDomains: '涵蓋網域',
   Issuer: '發行商', Fingerprint: '憑證指紋', ValidTo: '到期日', Username: '帳號', DisplayName: '姓名 / 單位',
   Upstreams: '後端主機', LbMethod: '分配方式', LbCookieName: 'Cookie 名稱',
+  WafMode: 'WAF 模式', WafExcludeIds: 'WAF 排除規則', Enabled: 'WAF 總開關', ParanoiaLevel: '嚴格程度', InboundThreshold: '阻擋門檻',
   reason: '原因', source: '帳號來源', status: '狀態', message: '訊息',
 };
 const auditDetail = (d) => {
@@ -236,9 +238,54 @@ function onTabChange(name) {
 const pendingChanges = computed(() => {
   const last = logs.value.find((l) => l.Status === 'SUCCESS');
   const lastTs = last?.FinishedAt ? new Date(last.FinishedAt).getTime() : 0;
-  const newest = Math.max(0, ...rules.value.map((r) => new Date(r.UpdatedAt).getTime()), ...certs.value.map((c) => new Date(c.UpdatedAt).getTime()));
+  const newest = Math.max(0, ...rules.value.map((r) => new Date(r.UpdatedAt).getTime()), ...certs.value.map((c) => new Date(c.UpdatedAt).getTime()),
+    // WafSettings 只有被人修改過（UpdatedBy 有值）才算；資料表剛建立時的初始時間不算變更
+    wafCfg.value.UpdatedAt && wafCfg.value.UpdatedBy ? new Date(wafCfg.value.UpdatedAt).getTime() : 0);
   return newest > lastTs;
 });
+
+/* ------------------------------------------------------------------ WAF（ModSecurity + OWASP CRS） */
+const WAF_MODE = {
+  off: { text: '關閉', type: 'info', hint: '不檢查' },
+  detect: { text: '僅偵測', type: 'warning', hint: '只記錄可疑請求，不阻擋（建議先觀察 1–2 週，找出誤判再改阻擋）' },
+  block: { text: '阻擋', type: 'danger', hint: '判定為攻擊的請求直接回 403' },
+};
+const PARANOIA = [
+  { v: 1, text: '1 標準', hint: '誤判最少，建議大多數網站使用' },
+  { v: 2, text: '2 加強', hint: '多檢查一些攻擊手法，誤判稍多' },
+  { v: 3, text: '3 嚴格', hint: '誤判明顯增加，需要大量排除設定' },
+  { v: 4, text: '4 極嚴格', hint: '只適合高敏感系統，誤判非常多' },
+];
+const wafCfg = ref({ Enabled: false, ParanoiaLevel: 1, InboundThreshold: 5, ruleCounts: { detect: 0, block: 0 } });
+const wafForm = reactive({ Enabled: false, ParanoiaLevel: 1, InboundThreshold: 5 });
+const wafSaving = ref(false);
+async function loadWaf() {
+  try {
+    wafCfg.value = await api.get('/waf/settings');
+    Object.assign(wafForm, { Enabled: wafCfg.value.Enabled, ParanoiaLevel: wafCfg.value.ParanoiaLevel, InboundThreshold: wafCfg.value.InboundThreshold });
+  } catch { /* 舊版資料庫沒有 WafSettings 時不打擾使用者 */ }
+}
+const wafDirty = computed(() => wafForm.Enabled !== wafCfg.value.Enabled || wafForm.ParanoiaLevel !== wafCfg.value.ParanoiaLevel || wafForm.InboundThreshold !== wafCfg.value.InboundThreshold);
+async function saveWaf() {
+  wafSaving.value = true;
+  try {
+    await api.put('/waf/settings', { ...wafForm });
+    ElMessage.success('已儲存（需按「一鍵同步部署」才會生效）');
+    await loadWaf();
+  } catch (e) { ElMessage.error(e.message); } finally { wafSaving.value = false; }
+}
+/** 節點 WAF 模組狀態（健康檢查時更新） */
+const nodeWaf = (n) => n.Stats?.waf || null;
+const wafNodesMissing = computed(() => nodes.value.filter((n) => n.IsActive && n.Stats && !n.Stats.error && nodeWaf(n) && !nodeWaf(n).ready));
+/** 規則清單的 WAF 欄位：總開關關閉時以灰色標示「未生效」 */
+function wafTag(r) {
+  const m = WAF_MODE[r.WafMode || 'off'] || WAF_MODE.off;
+  if ((r.WafMode || 'off') === 'off') return { text: '關閉', type: 'info', tip: '' };
+  if (!wafCfg.value.Enabled) return { text: m.text, type: 'info', tip: 'WAF 總開關關閉中，此設定尚未生效' };
+  if (r.IsMaintenance) return { text: m.text, type: 'info', tip: '維護中頁面不經過 WAF' };
+  const ex = r.WafExcludeIds ? r.WafExcludeIds.split(',').length : 0;
+  return { text: m.text, type: m.type, tip: ex ? `排除 ${ex} 條規則：${r.WafExcludeIds}` : '' };
+}
 
 /* ------------------------------------------------------------------ 節點 */
 async function checkNodes() {
@@ -332,6 +379,7 @@ const blankRule = () => ({
   ForceHttps: true, EnableWebSocket: false, ClientMaxBodySize: '2M',
   IsActive: true, IsMaintenance: false, CustomNginxSnippet: '', Remark: '',
   LbMethod: 'round_robin', LbCookieName: '', Upstreams: [blankUpstream()],
+  WafMode: 'off', WafExcludeIds: '',
 });
 const LB_METHOD = {
   round_robin: { text: '輪流', hint: '依權重輪流分配，適合大多數系統' },
@@ -356,12 +404,13 @@ const ruleRules = {
   Upstreams: [{ validator: validateUpstreams, trigger: 'submit' }],
   LbCookieName: [{ validator: (_r, v, cb) => (ruleDlg.form.LbMethod !== 'cookie' || /^[A-Za-z0-9_]{1,64}$/.test(v || '') ? cb() : cb(new Error('Cookie 名稱只能用英數字與底線'))), trigger: 'blur' }],
   CertificateId: [{ required: true, message: '請選擇 SSL 憑證', trigger: 'change' }],
+  WafExcludeIds: [{ validator: (_r, v, cb) => (String(v || '').split(/[s,，、]+/).filter(Boolean).every((x) => /^d{6,7}$/.test(x)) ? cb() : cb(new Error('只能填 6–7 位數字的規則 ID，以逗號分隔'))), trigger: 'blur' }],
 };
 
 function openRule(row) {
   ruleDlg.id = row ? row.Id : null;
   ruleDlg.form = row
-    ? { ...blankRule(), ...row, certificate: undefined, LbCookieName: row.LbCookieName || '', Upstreams: ruleUpstreams(row).map(({ Host, Port, Weight, IsBackup, IsActive }) => ({ Host, Port, Weight, IsBackup, IsActive })) }
+    ? { ...blankRule(), ...row, certificate: undefined, LbCookieName: row.LbCookieName || '', WafMode: row.WafMode || 'off', WafExcludeIds: row.WafExcludeIds || '', Upstreams: ruleUpstreams(row).map(({ Host, Port, Weight, IsBackup, IsActive }) => ({ Host, Port, Weight, IsBackup, IsActive })) }
     : blankRule();
   ruleDlg.visible = true;
 }
@@ -814,6 +863,11 @@ onMounted(() => {
             <div class="node-name">{{ n.NodeName }}</div>
             <div class="node-meta">{{ n.IpAddress }}:{{ n.SshPort }} · {{ n.IsActive ? HEALTH_TEXT[n.HealthStatus] : '已停用' }}</div>
             <div class="node-meta">最後同步：{{ fmt(n.LastSyncAt) }}</div>
+            <div v-if="n.IsActive && nodeWaf(n)" class="node-meta">
+              <span :class="nodeWaf(n).ready ? 'waf-ok' : 'waf-miss'">
+                WAF 模組：{{ nodeWaf(n).ready ? `已安裝（CRS ${nodeWaf(n).crsVersion || '?'}）` : '未安裝' }}
+              </span>
+            </div>
           </div>
           <el-switch :model-value="n.IsActive" size="small" @change="(v) => toggleNode(n, v)" />
           <el-button size="small" :icon="Document" circle text title="檢視 Nginx Log" @click="openNodeLog(n)" />
@@ -900,6 +954,13 @@ onMounted(() => {
             <template #default="{ row }"><el-tag size="small" :type="row.EnableWebSocket ? 'success' : 'info'">{{ row.EnableWebSocket ? '支援' : '否' }}</el-tag></template>
           </el-table-column>
           <el-table-column prop="ClientMaxBodySize" label="上傳上限" width="90" align="center" />
+          <el-table-column label="WAF" width="90" align="center">
+            <template #default="{ row }">
+              <el-tooltip :content="wafTag(row).tip" :disabled="!wafTag(row).tip" placement="top">
+                <el-tag size="small" :type="wafTag(row).type" :effect="(row.WafMode || 'off') !== 'off' && wafCfg.Enabled ? 'dark' : 'light'">{{ wafTag(row).text }}</el-tag>
+              </el-tooltip>
+            </template>
+          </el-table-column>
           <el-table-column label="啟用" width="80" align="center">
             <template #default="{ row }"><el-switch :model-value="row.IsActive" size="small" @change="(v) => quickToggle(row, 'IsActive', v)" /></template>
           </el-table-column>
@@ -996,6 +1057,62 @@ onMounted(() => {
             </template>
           </el-table-column>
         </el-table>
+      </el-tab-pane>
+
+      <!-- ============ WAF 防護 ============ -->
+      <el-tab-pane name="waf">
+        <template #label><span class="tab-label"><el-icon><Lock /></el-icon>WAF 防護</span></template>
+        <div class="waf-page">
+          <el-alert v-if="wafCfg.missingTable" type="error" :closable="false" show-icon
+                    title="資料庫尚未建立 WAF 資料表，請先執行 database/schema.sql" />
+          <el-alert v-if="wafNodesMissing.length" type="warning" :closable="false" show-icon
+                    :title="`${wafNodesMissing.map((n) => n.NodeName).join('、')} 尚未安裝 WAF 模組，開啟 WAF 的網域將無法部署`"
+                    description="請依操作手冊「WAF 模組安裝」以 sysadmin 在節點執行安裝指令（只安裝不啟用，不影響網站）。" />
+          <el-card shadow="never" class="waf-card">
+            <template #header><b>全域設定</b><span class="hint">ModSecurity v3 + OWASP 核心規則集（CRS），在 Nginx 解開 SSL 後檢查請求</span></template>
+            <el-form label-width="120px" class="waf-form">
+              <el-form-item label="WAF 總開關">
+                <el-switch v-model="wafForm.Enabled" active-text="開啟" inactive-text="關閉" />
+                <div class="form-hint">關閉時所有網域都不檢查，部署出去的設定與未導入 WAF 前完全相同。各網域在「網域對照規則」的編輯視窗設定 關閉 / 僅偵測 / 阻擋。</div>
+              </el-form-item>
+              <el-form-item label="嚴格程度">
+                <el-radio-group v-model="wafForm.ParanoiaLevel">
+                  <el-radio-button v-for="p in PARANOIA" :key="p.v" :value="p.v">{{ p.text }}</el-radio-button>
+                </el-radio-group>
+                <div class="form-hint">{{ PARANOIA.find((p) => p.v === wafForm.ParanoiaLevel)?.hint }}</div>
+              </el-form-item>
+              <el-form-item label="阻擋門檻分數">
+                <el-input-number v-model="wafForm.InboundThreshold" :min="1" :max="100" :step="1" />
+                <div class="form-hint">每條命中的規則會累加分數（嚴重 5 分、錯誤 4 分、警告 3 分），達到門檻即判定為攻擊。預設 5，數字越大越寬鬆。</div>
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :loading="wafSaving" :disabled="!wafDirty" @click="saveWaf">儲存設定</el-button>
+                <span v-if="wafCfg.UpdatedAt && wafCfg.UpdatedBy" class="hint">最後修改：{{ fmt(wafCfg.UpdatedAt) }}（{{ wafCfg.UpdatedBy }}）</span>
+              </el-form-item>
+            </el-form>
+          </el-card>
+          <el-card shadow="never" class="waf-card">
+            <template #header><b>目前狀態</b></template>
+            <el-descriptions :column="1" border size="small">
+              <el-descriptions-item label="總開關">
+                <el-tag :type="wafCfg.Enabled ? 'success' : 'info'">{{ wafCfg.Enabled ? '開啟' : '關閉' }}</el-tag>
+              </el-descriptions-item>
+              <el-descriptions-item label="網域設定">
+                僅偵測 <b>{{ wafCfg.ruleCounts?.detect || 0 }}</b> 個、阻擋 <b>{{ wafCfg.ruleCounts?.block || 0 }}</b> 個（只計啟用中的規則）
+              </el-descriptions-item>
+              <el-descriptions-item v-for="n in nodes.filter((x) => x.IsActive)" :key="n.Id" :label="n.NodeName">
+                <template v-if="nodeWaf(n)">
+                  <el-tag :type="nodeWaf(n).ready ? 'success' : 'danger'" size="small">{{ nodeWaf(n).ready ? '模組已安裝' : '模組未安裝' }}</el-tag>
+                  <span v-if="nodeWaf(n).crsVersion" class="hint">OWASP CRS {{ nodeWaf(n).crsVersion }}</span>
+                </template>
+                <span v-else class="hint">尚未檢測（按節點旁的重新整理）</span>
+              </el-descriptions-item>
+            </el-descriptions>
+            <div class="form-hint" style="margin-top: 10px">
+              建議導入順序：總開關開啟 → 網域先設「僅偵測」並部署 → 觀察 1–2 週，在「檢視 Nginx Log」的 error.log 搜尋 <code>ModSecurity</code> 找出誤判，把規則 ID 加入排除 → 再改「阻擋」。
+            </div>
+          </el-card>
+        </div>
       </el-tab-pane>
 
       <!-- ============ 部署紀錄 ============ -->
@@ -1373,6 +1490,19 @@ onMounted(() => {
           <el-checkbox v-model="ruleDlg.form.IsMaintenance">系統維護中頁面</el-checkbox>
         </el-form-item>
         <el-form-item label="上傳檔案上限"><el-input v-model="ruleDlg.form.ClientMaxBodySize" placeholder="2M" style="width: 160px" /></el-form-item>
+        <el-form-item label="WAF 防護">
+          <el-radio-group v-model="ruleDlg.form.WafMode">
+            <el-radio-button v-for="(m, k) in WAF_MODE" :key="k" :value="k">{{ m.text }}</el-radio-button>
+          </el-radio-group>
+          <div class="form-hint">
+            {{ WAF_MODE[ruleDlg.form.WafMode].hint }}
+            <template v-if="ruleDlg.form.WafMode !== 'off' && !wafCfg.Enabled"><br><b class="warn-text">WAF 總開關目前關閉，需到「WAF 防護」分頁開啟才會生效。</b></template>
+          </div>
+        </el-form-item>
+        <el-form-item v-if="ruleDlg.form.WafMode !== 'off'" label="WAF 排除規則" prop="WafExcludeIds">
+          <el-input v-model="ruleDlg.form.WafExcludeIds" placeholder="例：942100, 920350（只能填數字規則 ID，逗號分隔）" />
+          <div class="form-hint">被誤擋時，把 WAF 事件中的規則 ID 填在這裡，這個網域就不再套用該規則。</div>
+        </el-form-item>
         <el-form-item label="自訂 Nginx 語法">
           <el-input v-model="ruleDlg.form.CustomNginxSnippet" type="textarea" :rows="5" class="mono"
                     placeholder="插入 443 server 區塊，例如：&#10;proxy_buffering off;&#10;add_header X-Frame-Options SAMEORIGIN;" />
@@ -1542,6 +1672,14 @@ onMounted(() => {
 .domain-link { color: var(--el-color-primary); text-decoration: none; word-break: break-all; }
 .domain-link:hover { text-decoration: underline; }
 .date-cell { font-size: 12px; color: #606266; white-space: nowrap; }
+.waf-ok { color: #67c23a; }
+.waf-miss { color: #f56c6c; }
+.warn-text { color: #e6a23c; }
+.tab-label { display: inline-flex; align-items: center; gap: 4px; }
+.waf-page { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; align-items: start; }
+.waf-page > .el-alert { grid-column: 1 / -1; }
+.waf-card .hint { margin-left: 10px; }
+@media (max-width: 900px) { .waf-page { grid-template-columns: 1fr; } }
 .idle-days { font-size: 12px; color: #909399; white-space: nowrap; }
 .cut-body { min-height: 160px; }
 .cut-summary { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }

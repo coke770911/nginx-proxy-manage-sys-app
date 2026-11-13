@@ -99,6 +99,40 @@ IF OBJECT_ID(N'CK_DomainRules_LbMethod', N'C') IS NULL
     ALTER TABLE dbo.DomainRules ADD CONSTRAINT CK_DomainRules_LbMethod CHECK (LbMethod IN (N'round_robin', N'least_conn', N'cookie'));
 GO
 
+/* ---- WAF（v1.0.13 起，ModSecurity v3 + OWASP CRS）
+        WafMode：off = 關閉（預設）；detect = 僅偵測（只記錄）；block = 阻擋
+        WafExcludeIds：排除的 CRS 規則 ID，逗號分隔（只允許數字，系統會再驗證） ---- */
+IF COL_LENGTH(N'dbo.DomainRules', N'WafMode') IS NULL
+    ALTER TABLE dbo.DomainRules ADD
+        WafMode       NVARCHAR(16)  NOT NULL CONSTRAINT DF_DomainRules_WafMode DEFAULT (N'off'),
+        WafExcludeIds NVARCHAR(500) NULL;
+GO
+IF OBJECT_ID(N'CK_DomainRules_WafMode', N'C') IS NULL
+    ALTER TABLE dbo.DomainRules ADD CONSTRAINT CK_DomainRules_WafMode CHECK (WafMode IN (N'off', N'detect', N'block'));
+GO
+
+/* ---------------------------------------------------------------------------
+   3a. WafSettings — WAF 全域設定（只有 Id = 1 一筆）
+       Enabled：總開關，關閉時所有網域的 WAF 設定都不產生
+       ParanoiaLevel：CRS 嚴格程度 1–4；InboundThreshold：請求異常分數達到此值即判定攻擊
+   --------------------------------------------------------------------------- */
+IF OBJECT_ID(N'dbo.WafSettings', N'U') IS NULL
+CREATE TABLE dbo.WafSettings (
+    Id               INT           NOT NULL CONSTRAINT PK_WafSettings PRIMARY KEY,
+    Enabled          BIT           NOT NULL CONSTRAINT DF_WafSettings_Enabled DEFAULT (0),
+    ParanoiaLevel    INT           NOT NULL CONSTRAINT DF_WafSettings_PL DEFAULT (1),
+    InboundThreshold INT           NOT NULL CONSTRAINT DF_WafSettings_In DEFAULT (5),
+    UpdatedBy        NVARCHAR(100) NULL,
+    UpdatedAt        DATETIME2(3)  NOT NULL CONSTRAINT DF_WafSettings_UpdatedAt DEFAULT (SYSUTCDATETIME()),
+    CONSTRAINT CK_WafSettings_Single CHECK (Id = 1),
+    CONSTRAINT CK_WafSettings_PL     CHECK (ParanoiaLevel BETWEEN 1 AND 4),
+    CONSTRAINT CK_WafSettings_In     CHECK (InboundThreshold BETWEEN 1 AND 100)
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM dbo.WafSettings WHERE Id = 1)
+    INSERT INTO dbo.WafSettings (Id, Enabled, ParanoiaLevel, InboundThreshold) VALUES (1, 0, 1, 5);
+GO
+
 /* ---------------------------------------------------------------------------
    3b. RuleUpstreams — 每條規則的後端主機清單（Nginx upstream 成員）
        Weight：權重 1–100；IsBackup：備援機（主要後端都失效時才使用，cookie 分配方式不可用）

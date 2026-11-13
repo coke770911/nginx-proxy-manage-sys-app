@@ -48,7 +48,17 @@ const DomainRule = sequelize.define('DomainRule', {
   Remark: { type: DataTypes.STRING(500) },
   LbMethod: { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'round_robin' },
   LbCookieName: { type: DataTypes.STRING(64) },
+  WafMode: { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'off' },
+  WafExcludeIds: { type: DataTypes.STRING(500) },
 }, { tableName: 'DomainRules', ...stamps });
+
+const WafSetting = sequelize.define('WafSetting', {
+  Id: { type: DataTypes.INTEGER, primaryKey: true },
+  Enabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  ParanoiaLevel: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },
+  InboundThreshold: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 5 },
+  UpdatedBy: { type: DataTypes.STRING(100) },
+}, { tableName: 'WafSettings', freezeTableName: true, createdAt: false, updatedAt: 'UpdatedAt' });
 
 const RuleUpstream = sequelize.define('RuleUpstream', {
   Id: pk(),
@@ -102,4 +112,4 @@ SslCertificate.hasMany(DomainRule, { foreignKey: 'CertificateId', as: 'rules' })
 DomainRule.hasMany(RuleUpstream, { foreignKey: 'RuleId', as: 'Upstreams', onDelete: 'CASCADE' });
 RuleUpstream.belongsTo(DomainRule, { foreignKey: 'RuleId' });
 
-module.exports = { sequelize, ProxyNode, SslCertificate, DomainRule, RuleUpstream, DeployLog, AuditLog, AdminAccount };
+module.exports = { sequelize, ProxyNode, SslCertificate, DomainRule, RuleUpstream, DeployLog, AuditLog, AdminAccount, WafSetting };
