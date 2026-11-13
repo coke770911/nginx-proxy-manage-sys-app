@@ -1,7 +1,8 @@
 'use strict';
 /** 全域 IP 黑名單（IpAccessSettings 只有 Id = 1 一筆） */
 const { IpAccessSetting } = require('../models');
-const { parseList, formatList, MAX_GLOBAL_ENTRIES } = require('./ipAccessService');
+const { parseList, formatList, expandEntries, MAX_GLOBAL_ENTRIES } = require('./ipAccessService');
+const ipGroups = require('./ipGroupService');
 
 const DEFAULTS = { Id: 1, BlockList: null, UpdatedBy: null, UpdatedAt: null };
 const LIST_OPTS = { max: MAX_GLOBAL_ENTRIES, label: '全域黑名單' };
@@ -17,10 +18,16 @@ async function get() {
   }
 }
 
-/** 目前黑名單的有效項目（部署用） */
-async function blockEntries() {
+/**
+ * 目前黑名單的有效項目（已展開「@群組」，部署用）
+ * @param groups 已載入的群組 Map；未提供時自行載入
+ */
+async function blockEntries(groups) {
   const s = await get();
-  return parseList(s.BlockList, LIST_OPTS).entries;
+  const map = groups || await ipGroups.loadMap();
+  const { entries, missing } = expandEntries(parseList(s.BlockList, LIST_OPTS).entries, map);
+  if (missing.length) throw new Error(`全域黑名單引用了不存在的 IP 群組：${missing.map((m) => `@${m}`).join('、')}`);
+  return entries;
 }
 
 /** 更新黑名單；格式錯誤丟 400。回傳 { before, after, count } */
@@ -37,7 +44,8 @@ async function update(input, username) {
     e.status = 400;
     throw e;
   }
-  const values = { BlockList: formatList(entries), UpdatedBy: String(username || '').slice(0, 100) || null };
+  await ipGroups.assertRefsExist(input.BlockList, '全域黑名單');
+  const values ={ BlockList: formatList(entries), UpdatedBy: String(username || '').slice(0, 100) || null };
   const row = await IpAccessSetting.findByPk(1);
   if (row) await row.update(values);
   else await IpAccessSetting.create({ Id: 1, ...values });

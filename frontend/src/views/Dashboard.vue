@@ -243,7 +243,8 @@ const pendingChanges = computed(() => {
   const newest = Math.max(0, ...rules.value.map((r) => new Date(r.UpdatedAt).getTime()), ...certs.value.map((c) => new Date(c.UpdatedAt).getTime()),
     // WafSettings 只有被人修改過（UpdatedBy 有值）才算；資料表剛建立時的初始時間不算變更
     wafCfg.value.UpdatedAt && wafCfg.value.UpdatedBy ? new Date(wafCfg.value.UpdatedAt).getTime() : 0,
-    ipCfg.value.UpdatedAt && ipCfg.value.UpdatedBy ? new Date(ipCfg.value.UpdatedAt).getTime() : 0);
+    ipCfg.value.UpdatedAt && ipCfg.value.UpdatedBy ? new Date(ipCfg.value.UpdatedAt).getTime() : 0,
+    ipGroupNewest.value);
   return newest > lastTs;
 });
 
@@ -302,6 +303,7 @@ async function loadIp() {
     ipCfg.value = await api.get('/ip-access/settings');
     ipForm.BlockList = ipCfg.value.BlockList || '';
   } catch { /* 舊版資料庫沒有 IpAccessSettings 時不打擾使用者 */ }
+  await loadIpGroups();
 }
 const ipDirty = computed(() => ipForm.BlockList.trim() !== (ipCfg.value.BlockList || '').trim());
 async function saveIp() {
@@ -321,6 +323,79 @@ function ipTag(r) {
   const n = ipListCount(r.IpAccessList);
   const lines = String(r.IpAccessList || '').split(/\r?\n/).filter(Boolean);
   return { text: `${IP_MODE[mode].text} ${n}`, type: IP_MODE[mode].type, tip: lines.slice(0, 8).join('、') + (lines.length > 8 ? `…共 ${lines.length} 筆` : '') };
+}
+/* ---- IP 群組（清單中以「@名稱」引用，部署時展開） */
+const ipGroupData = ref({ groups: [], limit: 1000 });
+async function loadIpGroups() {
+  try { ipGroupData.value = await api.get('/ip-access/groups'); } catch { /* 舊版資料庫沒有 IpGroups 時不打擾使用者 */ }
+}
+const groupDlg = reactive({ visible: false, saving: false, id: null, usedBy: [], form: { Name: '', Description: '', Entries: '' } });
+function openGroup(g) {
+  groupDlg.id = g ? g.Id : null;
+  groupDlg.usedBy = g ? g.usedBy || [] : [];
+  groupDlg.form = { Name: g?.Name || '', Description: g?.Description || '', Entries: g?.Entries || '' };
+  groupDlg.visible = true;
+}
+async function saveGroup() {
+  groupDlg.saving = true;
+  try {
+    if (groupDlg.id) await api.put(`/ip-access/groups/${groupDlg.id}`, groupDlg.form);
+    else await api.post('/ip-access/groups', groupDlg.form);
+    ElMessage.success(groupDlg.usedBy.length ? '已儲存（引用此群組的設定需按「一鍵同步部署」才會更新）' : '已儲存');
+    groupDlg.visible = false;
+    await loadIpGroups();
+  } catch (e) { ElMessage.error(e.message); } finally { groupDlg.saving = false; }
+}
+async function deleteGroup(g) {
+  try {
+    await ElMessageBox.confirm(`確定刪除 IP 群組「@${g.Name}」？`, '刪除確認', { type: 'warning', confirmButtonText: '刪除', cancelButtonText: '取消' });
+  } catch { return; }
+  try {
+    await api.delete(`/ip-access/groups/${g.Id}`);
+    ElMessage.success('已刪除');
+    await loadIpGroups();
+  } catch (e) { ElMessage.error(e.message); }
+}
+const ipGroupNewest = computed(() => Math.max(0, ...(ipGroupData.value.groups || []).map((g) => new Date(g.UpdatedAt).getTime())));
+
+/* ---- 從 WAF Log 一鍵封鎖來源 IP */
+const WAF_CLIENT_RE = /, client: ([0-9a-fA-F:.]+), server: ([^,\s]+)/;
+function wafLogMeta(line) {
+  const m = line.match(WAF_CLIENT_RE);
+  if (!m) return null;
+  const ids = [...line.matchAll(/\[id "(\d+)"\]/g)].map((x) => x[1]).filter((x) => x !== '949110');
+  return { ip: m[1], server: m[2].toLowerCase(), time: (line.match(/^(\d{4}\/\d{2}\/\d{2} \d{2}:\d{2})/) || [])[1] || '', ids, denied: /Access denied/.test(line) };
+}
+/** 已封鎖時回傳說明文字（後端依目前資料庫設定判斷，尚未部署的也算） */
+function wafIpBlocked(meta) {
+  const s = nodeLogDlg.data?.ipStatus?.[meta.ip];
+  if (!s) return '';
+  if (s.global) return `全域黑名單（${s.global}）`;
+  const d = s.domains?.[meta.server];
+  if (!d) return '';
+  return d === '只允許清單外' ? '不在網域的只允許清單內' : `網域拒絕清單（${d}）`;
+}
+const blockDlg = reactive({ visible: false, saving: false, ip: '', server: '', scope: 'global', range: 'single', remark: '' });
+const blockRule = computed(() => rules.value.find((r) => r.DomainName.toLowerCase() === blockDlg.server) || null);
+const blockTarget = computed(() => {
+  if (blockDlg.range === 'single') return blockDlg.ip;
+  return blockDlg.ip.includes(':') ? `${blockDlg.ip}/64` : `${blockDlg.ip.split('.').slice(0, 3).join('.')}.0/24`;
+});
+function openBlock(meta) {
+  Object.assign(blockDlg, {
+    visible: true, saving: false, ip: meta.ip, server: meta.server, scope: 'global', range: 'single',
+    remark: ['WAF', meta.time, meta.server, meta.ids.length ? `規則 ${meta.ids.slice(0, 5).join(',')}` : ''].filter(Boolean).join(' '),
+  });
+}
+async function submitBlock() {
+  blockDlg.saving = true;
+  try {
+    const r = await api.post('/ip-access/block', { target: blockTarget.value, scope: blockDlg.scope, domain: blockDlg.server, remark: blockDlg.remark });
+    ElMessage.success(`${r.message}（請按「一鍵同步部署」）`);
+    blockDlg.visible = false;
+    loadAll();
+    loadNodeLog();
+  } catch (e) { ElMessage.error(e.message); } finally { blockDlg.saving = false; }
 }
 
 /** 規則清單的 WAF 欄位：總開關關閉時以灰色標示「未生效」 */
@@ -871,8 +946,8 @@ const wafLogDomains = computed(() => {
   return list.sort((a, b) => (b.on - a.on) || a.name.localeCompare(b.name));
 });
 const nodeLogLines = computed(() => {
-  const l = nodeLogDlg.data?.lines || [];
-  return nodeLogDlg.newestFirst ? [...l].reverse() : l;
+  const l = (nodeLogDlg.data?.lines || []).map((text) => ({ text, meta: nodeLogDlg.type === 'waf' ? wafLogMeta(text) : null }));
+  return nodeLogDlg.newestFirst ? l.reverse() : l;
 });
 
 /* ------------------------------------------------------------------ 部署紀錄詳情 */
@@ -956,9 +1031,10 @@ onMounted(() => {
           <el-button type="primary" :icon="Plus" @click="openRule(null)">新增規則</el-button>
           <el-button :icon="Upload" @click="openImport">匯入</el-button>
           <el-button :icon="Download" @click="exportRules">匯出</el-button>
-          <el-button :icon="Aim" :disabled="!ruleSelection.length || !cutoverCfg.enabled"
-                     :title="cutoverCfg.enabled ? `模擬 DNS 改指 ${cutoverCfg.vip} 後的連線結果（唯讀）` : '尚未設定 CUTOVER_VIP'"
-                     @click="runCutoverCheck(ruleSelection)">
+          <el-button :icon="Aim" :disabled="!cutoverCfg.enabled"
+                     :title="!cutoverCfg.enabled ? '尚未設定 CUTOVER_VIP'
+                       : ruleSelection.length ? `模擬 DNS 改指 ${cutoverCfg.vip} 後的連線結果（唯讀）` : '請先勾選表格左側要檢查的規則（可多選）'"
+                     @click="ruleSelection.length ? runCutoverCheck(ruleSelection) : ElMessage.info('請先勾選表格左側要檢查的規則（可多選，一次最多 50 筆）；單筆也可按該列「操作」欄的準心圖示')">
             切換前檢查{{ ruleSelection.length ? `（${ruleSelection.length}）` : '' }}
           </el-button>
           <span class="hint">修改後需按右上角「一鍵同步部署」才會推送到 Nginx 節點。</span>
@@ -1192,13 +1268,38 @@ onMounted(() => {
                       :placeholder="'一行一筆，「#」後面是備註，例如：\n203.0.113.25        # 2026-11 大量掃描\n198.51.100.0/24     # 攻擊來源網段\n2001:db8::/32'" />
             <div class="form-hint">
               支援 IPv4 / IPv6 單一位址或網段（CIDR），最多 {{ ipCfg.limits?.global || 2000 }} 筆；重複的會自動去除，網段會整理成網路位址（例 120.96.1.77/24 → 120.96.1.0/24）。
-              不接受 0.0.0.0/0 這類代表全部位址的寫法。<code>/f5-health-check</code> 不受影響。
+              不接受 0.0.0.0/0 這類代表全部位址的寫法。<code>/f5-health-check</code> 不受影響。可寫 <code>@群組名稱</code> 引用下方的 IP 群組。
             </div>
             <div style="margin-top: 10px">
               <el-button type="primary" :loading="ipSaving" :disabled="!ipDirty" @click="saveIp">儲存黑名單</el-button>
               <span class="hint">目前 {{ ipCfg.blockCount || 0 }} 筆</span>
               <span v-if="ipCfg.UpdatedAt && ipCfg.UpdatedBy" class="hint">最後修改：{{ fmt(ipCfg.UpdatedAt) }}（{{ ipCfg.UpdatedBy }}）</span>
             </div>
+          </el-card>
+          <el-card shadow="never" class="waf-card ip-group-card">
+            <template #header>
+              <b>IP 群組</b><span class="hint">在清單中寫「@名稱」引用，群組一改，所有引用處部署後一起更新</span>
+              <el-button size="small" type="primary" :icon="Plus" style="float: right" @click="openGroup(null)">新增群組</el-button>
+            </template>
+            <el-table :data="ipGroupData.groups" size="small" border empty-text="尚未建立群組">
+              <el-table-column label="名稱" min-width="130"><template #default="{ row }"><code>@{{ row.Name }}</code></template></el-table-column>
+              <el-table-column prop="Description" label="說明" min-width="160" show-overflow-tooltip />
+              <el-table-column label="筆數" width="70" align="center"><template #default="{ row }">{{ row.count }}</template></el-table-column>
+              <el-table-column label="引用" min-width="160">
+                <template #default="{ row }">
+                  <span v-if="!row.usedBy.length" class="hint">未使用</span>
+                  <el-tooltip v-else :content="row.usedBy.join('、')" placement="top">
+                    <span>{{ row.usedBy.length }} 處：{{ row.usedBy.slice(0, 2).join('、') }}{{ row.usedBy.length > 2 ? '…' : '' }}</span>
+                  </el-tooltip>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="170" align="center">
+                <template #default="{ row }">
+                  <el-button link type="primary" :icon="Edit" @click="openGroup(row)">編輯</el-button>
+                  <el-button link type="danger" :icon="Delete" :disabled="row.usedBy.length > 0" @click="deleteGroup(row)">刪除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
           </el-card>
           <el-card shadow="never" class="waf-card">
             <template #header><b>說明</b></template>
@@ -1213,6 +1314,8 @@ onMounted(() => {
             <div class="form-hint" style="margin-top: 10px">
               <b>判斷順序</b>：全域黑名單 → 網域的「只允許 / 拒絕」清單 → WAF → 轉送後端。被擋的請求回 403 頁面（顯示對方 IP），不會進 WAF、也不會送到後端。<br>
               <b>網域設定</b>：在「網域對照規則」的編輯視窗設定 不限制 / 只允許 / 拒絕 與清單。<br>
+              <b>IP 群組</b>：網域清單與全域黑名單都可寫 <code>@群組名稱</code>；被引用中的群組不能刪除、改名或清空。<br>
+              <b>一鍵封鎖</b>：「檢視 Nginx Log」→ WAF 事件，每行行首有「封鎖」按鈕，可加入全域黑名單或該網域的拒絕清單。<br>
               <b>來源 IP</b>：經 F5 進來的連線以 PROXY protocol 取得真實 IP；被擋的紀錄可在「檢視 Nginx Log」的 access.log 搜尋 IP 或 <code> 403 </code>。<br>
               儲存後需按「一鍵同步部署」才會生效。
             </div>
@@ -1619,6 +1722,7 @@ onMounted(() => {
                     :placeholder="'一行一筆，「#」後面是備註，例如：\n120.96.0.0/16    # 校內\n203.0.113.25     # 合作廠商'" />
           <div class="form-hint">
             IPv4 / IPv6 位址或網段，最多 {{ ipCfg.limits?.rule || 200 }} 筆（目前 {{ ipListCount(ruleDlg.form.IpAccessList) }} 筆）。
+            <template v-if="ipGroupData.groups.length">可引用 IP 群組：<code v-for="g in ipGroupData.groups" :key="g.Id" class="ip-group-ref">@{{ g.Name }}</code></template>
             <template v-if="ruleDlg.form.IpAccessMode === 'allow'"><b class="warn-text">只允許模式下，沒列入的 IP（包含你自己）都會被擋，請確認清單已包含需要連線的網段。</b></template>
           </div>
         </el-form-item>
@@ -1765,13 +1869,71 @@ onMounted(() => {
         <div v-if="nodeLogDlg.type === 'waf'" class="hint">
           橘色 = 命中規則（Warning，僅偵測也會記錄），紅色 = 已阻擋（Access denied，id 949110 為總分判定）。
           誤判時把同一請求中 <code>[id "…"]</code> 的規則 ID（949110 除外）填入該網域的「WAF 排除規則」。
+          確定是攻擊時可按行首的「封鎖」把來源 IP 加入黑名單（部署後生效）。
         </div>
         <div class="logbox nlog-box">
           <div v-if="!nodeLogLines.length" class="logline">（沒有資料）</div>
-          <div v-for="(l, i) in nodeLogLines" :key="i" class="logline" :class="nodeLogClass(l)">{{ l }}</div>
+          <div v-for="(l, i) in nodeLogLines" :key="i" class="logline" :class="nodeLogClass(l.text)">
+            <template v-if="l.meta">
+              <span v-if="wafIpBlocked(l.meta)" class="nlog-blocked" :title="wafIpBlocked(l.meta)">已封鎖 {{ l.meta.ip }}</span>
+              <button v-else type="button" class="nlog-block-btn" :title="`封鎖來源 IP ${l.meta.ip}`" @click="openBlock(l.meta)">封鎖 {{ l.meta.ip }}</button>
+            </template>{{ l.text }}
+          </div>
         </div>
       </template>
       <div v-else-if="nodeLogDlg.loading" class="hint">讀取中…</div>
+    </el-dialog>
+
+    <!-- IP 群組 -->
+    <el-dialog v-model="groupDlg.visible" :title="groupDlg.id ? `編輯 IP 群組 @${groupDlg.form.Name}` : '新增 IP 群組'" width="560px" class="rwd-dialog">
+      <el-alert v-if="groupDlg.usedBy.length" type="info" :closable="false" show-icon style="margin-bottom: 12px"
+                :title="`使用中：${groupDlg.usedBy.join('、')}`" description="修改清單後，按「一鍵同步部署」這些設定才會更新；使用中的群組不能改名或清空。" />
+      <el-form label-width="80px">
+        <el-form-item label="名稱" required>
+          <el-input v-model="groupDlg.form.Name" maxlength="30" :disabled="groupDlg.usedBy.length > 0" placeholder="例：校內網段、行政單位、VPN">
+            <template #prepend>@</template>
+          </el-input>
+          <div class="form-hint">中英文、數字、底線或連字號，不可有空白；在清單中寫 <code>@{{ groupDlg.form.Name || '名稱' }}</code> 引用。</div>
+        </el-form-item>
+        <el-form-item label="說明"><el-input v-model="groupDlg.form.Description" maxlength="200" /></el-form-item>
+        <el-form-item label="位址">
+          <el-input v-model="groupDlg.form.Entries" type="textarea" :rows="10" class="mono"
+                    :placeholder="'一行一筆，「#」後面是備註，例如：\n120.96.0.0/16    # 校內\n10.10.0.0/16     # VPN'" />
+          <div class="form-hint">IPv4 / IPv6 位址或網段，最多 {{ ipGroupData.limit || 1000 }} 筆（目前 {{ ipListCount(groupDlg.form.Entries) }} 筆）；群組內不可再引用其他群組。</div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="groupDlg.visible = false">取消</el-button>
+        <el-button type="primary" :loading="groupDlg.saving" @click="saveGroup">儲存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 從 WAF Log 封鎖 IP -->
+    <el-dialog v-model="blockDlg.visible" :title="`封鎖來源 IP：${blockDlg.ip}`" width="520px" class="rwd-dialog" append-to-body>
+      <el-form label-width="80px">
+        <el-form-item label="範圍">
+          <el-radio-group v-model="blockDlg.range">
+            <el-radio-button value="single">只有這個 IP</el-radio-button>
+            <el-radio-button value="net">{{ blockDlg.ip.includes(':') ? '整個 /64 網段' : '整個 /24 網段' }}</el-radio-button>
+          </el-radio-group>
+          <div class="form-hint">將加入：<code>{{ blockTarget }}</code></div>
+        </el-form-item>
+        <el-form-item label="封鎖於">
+          <el-radio-group v-model="blockDlg.scope">
+            <el-radio value="global">全域黑名單（所有網域）</el-radio>
+            <el-radio value="rule" :disabled="!blockRule || blockRule.IpAccessMode === 'allow'">只有 {{ blockDlg.server }}</el-radio>
+          </el-radio-group>
+          <div v-if="!blockRule" class="form-hint">找不到 {{ blockDlg.server }} 的網域規則，只能加入全域黑名單。</div>
+          <div v-else-if="blockRule.IpAccessMode === 'allow'" class="form-hint">此網域是「只允許清單」模式，清單外的 IP 本來就無法連線。</div>
+          <div v-else-if="blockDlg.scope === 'rule' && blockRule.IpAccessMode === 'off'" class="form-hint warn-text">此網域目前不限制，將改為「拒絕清單」模式。</div>
+        </el-form-item>
+        <el-form-item label="備註"><el-input v-model="blockDlg.remark" maxlength="100" show-word-limit /></el-form-item>
+      </el-form>
+      <div class="form-hint">只會寫入設定，按「一鍵同步部署」後才生效；誤擋時到「IP 存取控制」或網域設定移除即可。</div>
+      <template #footer>
+        <el-button @click="blockDlg.visible = false">取消</el-button>
+        <el-button type="danger" :loading="blockDlg.saving" @click="submitBlock">加入封鎖</el-button>
+      </template>
     </el-dialog>
 
     <!-- 部署紀錄詳情 -->
@@ -1811,6 +1973,8 @@ onMounted(() => {
 .tab-label { display: inline-flex; align-items: center; gap: 4px; }
 .waf-page { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; align-items: start; }
 .waf-page > .el-alert { grid-column: 1 / -1; }
+/* IP 群組表格較寬：整列顯示在黑名單與說明下方 */
+.waf-page > .ip-group-card { grid-column: 1 / -1; order: 1; }
 .waf-card .hint { margin-left: 10px; }
 @media (max-width: 900px) { .waf-page { grid-template-columns: 1fr; } }
 .idle-days { font-size: 12px; color: #909399; white-space: nowrap; }
@@ -1857,6 +2021,11 @@ onMounted(() => {
 .nlog-q { width: 240px; }
 /* 需比後面的 .logbox（固定 340px）更明確才不會被蓋掉；視窗 top 4vh，扣掉標題列與工具列約 250px */
 .logbox.nlog-box { height: calc(92vh - 250px); min-height: 360px; }
+.nlog-block-btn, .nlog-blocked { display: inline-block; margin-right: 8px; padding: 0 6px; border-radius: 3px; font-size: 11.5px; line-height: 18px; font-family: inherit; vertical-align: 1px; }
+.nlog-block-btn { border: 1px solid #f56c6c; background: transparent; color: #f89898; cursor: pointer; }
+.nlog-block-btn:hover { background: #f56c6c; color: #fff; }
+.nlog-blocked { border: 1px solid #67c23a; color: #95d475; }
+.ip-group-ref { margin-right: 6px; }
 .nlog-hint { margin: 8px 0 0; white-space: pre-wrap; font-family: Consolas, 'Courier New', monospace; font-size: 12px; }
 @media (max-width: 768px) { .nlog-q, .nlog-lines, .nlog-domain { width: 100%; } }
 .row-count { margin-left: auto; color: #606266; font-size: 13px; white-space: nowrap; }

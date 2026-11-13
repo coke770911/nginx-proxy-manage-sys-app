@@ -60,6 +60,14 @@ const IpAccessSetting = sequelize.define('IpAccessSetting', {
   UpdatedBy: { type: DataTypes.STRING(100) },
 }, { tableName: 'IpAccessSettings', freezeTableName: true, createdAt: false, updatedAt: 'UpdatedAt' });
 
+const IpGroup = sequelize.define('IpGroup', {
+  Id: pk(),
+  Name: { type: DataTypes.STRING(30), allowNull: false, unique: true },
+  Description: { type: DataTypes.STRING(200) },
+  Entries: { type: DataTypes.TEXT },
+  UpdatedBy: { type: DataTypes.STRING(100) },
+}, { tableName: 'IpGroups', ...stamps });
+
 const WafSetting = sequelize.define('WafSetting', {
   Id: { type: DataTypes.INTEGER, primaryKey: true },
   Enabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
@@ -120,4 +128,4 @@ SslCertificate.hasMany(DomainRule, { foreignKey: 'CertificateId', as: 'rules' })
 DomainRule.hasMany(RuleUpstream, { foreignKey: 'RuleId', as: 'Upstreams', onDelete: 'CASCADE' });
 RuleUpstream.belongsTo(DomainRule, { foreignKey: 'RuleId' });
 
-module.exports = { sequelize, ProxyNode, SslCertificate, DomainRule, RuleUpstream, DeployLog, AuditLog, AdminAccount, WafSetting, IpAccessSetting };
+module.exports = { sequelize, ProxyNode, SslCertificate, DomainRule, RuleUpstream, DeployLog, AuditLog, AdminAccount, WafSetting, IpAccessSetting, IpGroup };

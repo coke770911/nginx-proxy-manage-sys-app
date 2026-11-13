@@ -331,9 +331,10 @@ function ppRealIp() {
 
 /**
  * @param {object} rule
- * @param {{ waf?: object, ipBlock?: boolean }} [opts]
+ * @param {{ waf?: object, ipBlock?: boolean, ipGroups?: Map }} [opts]
  *   waf = WAF 全域設定（WafSettings）；未提供或總開關關閉時不產生 WAF 指令
  *   ipBlock = 本次部署是否有全域 IP 黑名單（_ip_blocklist.conf 定義 $npm_ip_blocked）
+ *   ipGroups = IP 群組（ipGroupService.loadMap()），展開清單中的「@群組」；引用不存在的群組時丟錯
  */
 function renderConf(rule, opts = {}) {
   const errs = validateRule(rule);
@@ -359,9 +360,9 @@ function renderConf(rule, opts = {}) {
   const connVar = `$conn_upgrade_r${rule.Id || 0}`;
   const wafLines = waf.serverWafLines(rule, opts.waf);
   const wafOn = wafLines.length > 0;
-  const ipLines = ipAccess.serverIpLines(rule, !!opts.ipBlock);
+  const ipLines = ipAccess.serverIpLines(rule, !!opts.ipBlock, opts.ipGroups);
   const ipOn = ipLines.length > 0;
-  const ipAcl = ipAccess.ruleAcl(rule);
+  const ipAcl = ipAccess.ruleAcl(rule, opts.ipGroups);
   // IP 被拒絕時 rewrite 到這個 internal location，回 403 頁面（不經過 WAF、不送後端）
   const ipDeniedLocation = [
     `location = ${ipAccess.DENIED_URI} {`,
@@ -445,7 +446,7 @@ function renderConf(rule, opts = {}) {
     out.push('');
   }
 
-  ipAccess.ruleGeoLines(rule).forEach((l) => out.push(l));
+  ipAccess.ruleGeoLines(rule, opts.ipGroups).forEach((l) => out.push(l));
 
   if (ws && !rule.IsMaintenance) {
     out.push('# WebSocket：僅在帶 Upgrade 標頭時才送 Connection: upgrade，其餘維持 keepalive');

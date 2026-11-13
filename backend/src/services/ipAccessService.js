@@ -6,6 +6,7 @@
  *  - 全域黑名單（IpAccessSettings.BlockList）：所有網域一律拒絕 → sites-managed/_ip_blocklist.conf（http 層 geo）
  *  - 各網域（DomainRules.IpAccessMode / IpAccessList）：off 不限制 / allow 只允許清單 / deny 拒絕清單
  *    → 該網域設定檔頂端的 geo 對照表
+ *  - 兩者都可寫「@群組名稱」引用 IP 群組（IpGroups，v1.0.17 起），部署時由 expandEntries() 展開
  *
  * 判斷都放在 server 層的 rewrite 階段（if + rewrite 到 internal 頁面），因此：
  *  - 比 WAF（location 的 rewrite 階段）與 proxy_pass 更早，被擋的請求不會進 WAF、也不會送到後端
@@ -123,11 +124,18 @@ function normalizeCidr(input) {
 
 const cleanRemark = (s) => String(s || '').replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, REMARK_MAX);
 
+/* ------------------------------------------------------------------ IP 群組（v1.0.17 起） */
+// 群組名稱：中英文、數字、底線、連字號，1–30 字；清單中以「@名稱」引用（不分大小寫）
+const GROUP_NAME_RE = /^[\p{L}\p{N}_-]{1,30}$/u;
+const MAX_GROUP_ENTRIES = 1000;
+const groupKey = (name) => String(name || '').toLowerCase();
+
 /**
  * 解析清單文字：一行一筆（同一行也可用逗號 / 空白分隔多筆），「#」後為備註
- * @returns {{ entries: {cidr, remark}[], errs: string[] }}
+ * - allowGroups = true 時接受「@群組名稱」，項目為 { group, remark }；否則為 { cidr, remark }
+ * @returns {{ entries: ({cidr, remark}|{group, remark})[], errs: string[] }}
  */
-function parseList(text, { max = MAX_RULE_ENTRIES, label = 'IP 清單' } = {}) {
+function parseList(text, { max = MAX_RULE_ENTRIES, label = 'IP 清單', allowGroups = true } = {}) {
   const entries = [];
   const errs = [];
   const seen = new Set();
@@ -137,6 +145,16 @@ function parseList(text, { max = MAX_RULE_ENTRIES, label = 'IP 清單' } = {}) {
     const remark = hash >= 0 ? cleanRemark(line.slice(hash + 1)) : '';
     if (!body) return;
     body.split(/[\s,，、;；]+/).filter(Boolean).forEach((tok) => {
+      if (tok.startsWith('@')) {
+        const name = tok.slice(1);
+        if (!allowGroups) { errs.push(`${label}第 ${idx + 1} 行：群組內不可再引用群組（${tok.slice(0, 40)}）`); return; }
+        if (!GROUP_NAME_RE.test(name)) { errs.push(`${label}第 ${idx + 1} 行：「${tok.slice(0, 40)}」不是有效的群組名稱`); return; }
+        const k = `@${groupKey(name)}`;
+        if (seen.has(k)) return;
+        seen.add(k);
+        entries.push({ group: name, remark });
+        return;
+      }
       const r = normalizeCidr(tok);
       if (r.error) { errs.push(`${label}第 ${idx + 1} 行：${r.error}`); return; }
       if (seen.has(r.value)) return; // 重複的直接略過
@@ -148,12 +166,65 @@ function parseList(text, { max = MAX_RULE_ENTRIES, label = 'IP 清單' } = {}) {
   return { entries, errs: errs.slice(0, 10) };
 }
 
-/** 存入資料庫前的正規化文字（每行「位址  # 備註」）；空清單回 null */
+/** 存入資料庫前的正規化文字（每行「位址  # 備註」或「@群組  # 備註」）；空清單回 null */
 function formatList(entries) {
   if (!entries.length) return null;
-  return entries.map((e) => (e.remark ? `${e.cidr}  # ${e.remark}` : e.cidr)).join('\n');
+  return entries.map((e) => {
+    const v = e.group ? `@${e.group}` : e.cidr;
+    return e.remark ? `${v}  # ${e.remark}` : v;
+  }).join('\n');
 }
 const normalizeListText = (text, opts) => formatList(parseList(text, opts).entries);
+
+/** 清單文字中引用的群組名稱（小寫，去重） */
+function groupRefs(text) {
+  return [...new Set(parseList(text, { max: Infinity }).entries.filter((e) => e.group).map((e) => groupKey(e.group)))];
+}
+
+/**
+ * 把「@群組」展開成實際位址
+ * @param groups Map<小寫名稱, { Name, entries: {cidr, remark}[] }>
+ * @returns {{ entries: {cidr, remark}[], missing: string[] }}
+ */
+function expandEntries(entries, groups) {
+  const out = [];
+  const missing = [];
+  const seen = new Set();
+  const add = (cidr, remark) => { if (!seen.has(cidr)) { seen.add(cidr); out.push({ cidr, remark }); } };
+  entries.forEach((e) => {
+    if (!e.group) { add(e.cidr, e.remark); return; }
+    const g = groups && groups.get(groupKey(e.group));
+    if (!g) { missing.push(e.group); return; }
+    g.entries.forEach((x) => add(x.cidr, [`@${g.Name}`, x.remark].filter(Boolean).join(' ')));
+  });
+  return { entries: out, missing };
+}
+
+/* ------------------------------------------------------------------ 位址包含判斷 */
+function toBits(cidr) {
+  const [addr, pfx] = cidr.split('/');
+  const v4 = parseIpv4(addr);
+  if (v4) {
+    const bits = v4.reduce((acc, x) => (acc << 8n) | BigInt(x), 0n);
+    return { family: 4, len: 32, bits, prefix: pfx === undefined ? 32 : Number(pfx) };
+  }
+  const v6 = parseIpv6(addr);
+  if (!v6) return null;
+  const bits = v6.reduce((acc, x) => (acc << 16n) | BigInt(x), 0n);
+  return { family: 6, len: 128, bits, prefix: pfx === undefined ? 128 : Number(pfx) };
+}
+
+/** net 網段是否涵蓋 target（位址或網段）；兩者都須為正規化後的值 */
+function cidrCovers(net, target) {
+  const a = toBits(net);
+  const b = toBits(target);
+  if (!a || !b || a.family !== b.family || a.prefix > b.prefix) return false;
+  const shift = BigInt(a.len - a.prefix);
+  return (a.bits >> shift) === (b.bits >> shift);
+}
+
+/** 清單（已展開）中第一筆涵蓋 target 的項目；沒有回 null */
+const findCovering = (entries, target) => entries.find((e) => cidrCovers(e.cidr, target)) || null;
 
 /** 網域規則欄位驗證（由 nginxTemplate.validateRule 呼叫） */
 function validateRuleIp(r) {
@@ -190,20 +261,31 @@ function renderBlocklistConf(entries) {
   ].join('\n');
 }
 
-/** 該網域實際要套用的清單（off 或清單為空時回 null） */
-function ruleAcl(rule) {
+/**
+ * 該網域實際要套用的清單（已展開群組）；off 時回 null
+ * - 拒絕清單展開後為空 → 視為不限制（null）
+ * - 只允許清單展開後為空（例如引用的群組被清空）→ 仍產生對照表，等於全部拒絕，寧可擋住也不放行
+ * - 引用不存在的群組 → 丟錯（部署中止，不會產生放行所有人的設定）
+ * @param groups Map<小寫名稱, { Name, entries }>（deploy / 預覽時由 ipGroupService.loadMap() 取得）
+ */
+function ruleAcl(rule, groups) {
   const mode = rule.IpAccessMode || 'off';
   if (mode === 'off') return null;
-  const { entries } = parseList(rule.IpAccessList);
-  return entries.length ? { mode, entries } : null;
+  const parsed = parseList(rule.IpAccessList).entries;
+  const { entries, missing } = expandEntries(parsed, groups);
+  if (missing.length) throw new Error(`${rule.DomainName || '網域'} 的 IP 清單引用了不存在的群組：${missing.map((m) => `@${m}`).join('、')}`);
+  if (!entries.length && mode !== 'allow') return null;
+  if (!parsed.length) return null;
+  return { mode, entries, groups: parsed.filter((e) => e.group).map((e) => e.group) };
 }
 
 /** 網域設定檔頂端（http 層）的 geo；1 = 拒絕 */
-function ruleGeoLines(rule) {
-  const acl = ruleAcl(rule);
+function ruleGeoLines(rule, groups) {
+  const acl = ruleAcl(rule, groups);
   if (!acl) return [];
+  const gText = acl.groups.length ? `，含群組 ${acl.groups.map((g) => `@${commentSafe(g)}`).join(' ')}` : '';
   return [
-    `# IP 存取控制：${MODE_LABEL[acl.mode]}（${acl.entries.length} 筆）`,
+    `# IP 存取控制：${MODE_LABEL[acl.mode]}（${acl.entries.length} 筆${gText}）`,
     ...(acl.mode === 'allow'
       ? geoLines(ruleVar(rule), 1, 0, acl.entries)
       : geoLines(ruleVar(rule), 0, 1, acl.entries)),
@@ -215,8 +297,8 @@ function ruleGeoLines(rule) {
  * server 區塊內的判斷（已縮排 4 格）；沒有任何限制時回傳空陣列
  * @param {boolean} globalBlock 本次部署是否有全域黑名單
  */
-function serverIpLines(rule, globalBlock) {
-  const acl = ruleAcl(rule);
+function serverIpLines(rule, globalBlock, groups) {
+  const acl = ruleAcl(rule, groups);
   if (!acl && !globalBlock) return [];
   const label = [globalBlock && '全域黑名單', acl && `${MODE_LABEL[acl.mode]} ${acl.entries.length} 筆`].filter(Boolean).join(' + ');
   return [
@@ -230,7 +312,8 @@ function serverIpLines(rule, globalBlock) {
 }
 
 module.exports = {
-  MODES, MODE_LABEL, MAX_RULE_ENTRIES, MAX_GLOBAL_ENTRIES, BLOCKLIST_CONF_NAME, DENIED_URI,
+  MODES, MODE_LABEL, MAX_RULE_ENTRIES, MAX_GLOBAL_ENTRIES, MAX_GROUP_ENTRIES, BLOCKLIST_CONF_NAME, DENIED_URI, GROUP_NAME_RE,
   normalizeCidr, parseList, formatList, normalizeListText, validateRuleIp,
+  groupKey, groupRefs, expandEntries, cidrCovers, findCovering,
   renderBlocklistConf, ruleAcl, ruleGeoLines, serverIpLines,
 };

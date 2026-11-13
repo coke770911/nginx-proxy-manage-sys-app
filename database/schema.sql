@@ -163,6 +163,23 @@ IF NOT EXISTS (SELECT 1 FROM dbo.IpAccessSettings WHERE Id = 1)
 GO
 
 /* ---------------------------------------------------------------------------
+   3a-3. IpGroups — IP 群組（v1.0.17 起）
+         網域清單與全域黑名單可用「@群組名稱」引用；部署時展開成實際位址
+         Entries：一行一筆 IP / CIDR，「#」後為備註（群組內不可再引用群組）
+   --------------------------------------------------------------------------- */
+IF OBJECT_ID(N'dbo.IpGroups', N'U') IS NULL
+CREATE TABLE dbo.IpGroups (
+    Id          INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_IpGroups PRIMARY KEY,
+    Name        NVARCHAR(30)      NOT NULL CONSTRAINT UQ_IpGroups_Name UNIQUE,
+    Description NVARCHAR(200)     NULL,
+    Entries     NVARCHAR(MAX)     NULL,
+    UpdatedBy   NVARCHAR(100)     NULL,
+    CreatedAt   DATETIME2(3)      NOT NULL CONSTRAINT DF_IpGroups_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    UpdatedAt   DATETIME2(3)      NOT NULL CONSTRAINT DF_IpGroups_UpdatedAt DEFAULT (SYSUTCDATETIME())
+);
+GO
+
+/* ---------------------------------------------------------------------------
    3b. RuleUpstreams — 每條規則的後端主機清單（Nginx upstream 成員）
        Weight：權重 1–100；IsBackup：備援機（主要後端都失效時才使用，cookie 分配方式不可用）
    --------------------------------------------------------------------------- */

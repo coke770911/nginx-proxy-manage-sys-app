@@ -18,6 +18,7 @@ const waf = require('../services/wafService');
 const wafSettings = require('../services/wafSettingsService');
 const ipAccess = require('../services/ipAccessService');
 const ipSettings = require('../services/ipAccessSettingsService');
+const ipGroups = require('../services/ipGroupService');
 const config = require('../config');
 
 const router = express.Router();
@@ -84,7 +85,9 @@ router.get('/nodes/:id/logs', wrap(async (req, res) => {
   if (!node) throw new HttpError(404, '節點不存在');
   try {
     const r = await nodeLog.readNodeLog(node, { type: req.query.type, lines: req.query.lines, q: req.query.q, domain: req.query.domain });
-    res.json({ node: nodeName(node), ...r });
+    // WAF 事件附上每個來源 IP 目前是否已封鎖（log 視窗「封鎖」按鈕用）
+    const ipStatus = req.query.type === 'waf' ? await wafIpStatus(r.lines) : undefined;
+    res.json({ node: nodeName(node), ...r, ipStatus });
   } catch (e) {
     if (e instanceof nodeLog.LogError) return res.status(e.status).json({ message: e.message, hint: e.hint || null });
     throw e;
@@ -210,6 +213,7 @@ const withUpstreams = { model: RuleUpstream, as: 'Upstreams', attributes: ['Id',
 async function checkRule(plain) {
   const errs = validateRule(plain);
   if (errs.length) throw new HttpError(400, errs.join('；'));
+  await ipGroups.assertRefsExist(plain.IpAccessList, 'IP 清單');
   const cert = await SslCertificate.findByPk(plain.CertificateId, { attributes: NO_PEM });
   if (!cert) throw new HttpError(400, '所選憑證不存在');
   if (!certService.certCoversDomain(cert.SanDomains, plain.DomainName)) {
@@ -479,8 +483,15 @@ router.post('/rules/cutover-check', wrap(async (req, res) => {
 router.get('/rules/:id/preview', wrap(async (req, res) => {
   const rule = await loadRule(req.params.id);
   if (!rule) throw new HttpError(404, '規則不存在');
-  const ipBlock = (await ipSettings.blockEntries()).length > 0;
-  res.type('text/plain; charset=utf-8').send(renderConf(rule.get({ plain: true }), { waf: await wafSettings.get(), ipBlock }));
+  const ipGroupMap = await ipGroups.loadMap();
+  let text;
+  try {
+    const ipBlock = (await ipSettings.blockEntries(ipGroupMap)).length > 0;
+    text = renderConf(rule.get({ plain: true }), { waf: await wafSettings.get(), ipBlock, ipGroups: ipGroupMap });
+  } catch (e) {
+    throw new HttpError(400, e.message);
+  }
+  res.type('text/plain; charset=utf-8').send(text);
 }));
 
 /* =============================================================== WAF 全域設定 */
@@ -512,19 +523,140 @@ router.get('/ip-access/settings', wrap(async (req, res) => {
   res.json({ ...s, blockCount, ruleCounts: counts, limits: { global: ipAccess.MAX_GLOBAL_ENTRIES, rule: ipAccess.MAX_RULE_ENTRIES } });
 }));
 
-router.put('/ip-access/settings', wrap(async (req, res) => {
-  const { before, after, count } = await ipSettings.update(req.body || {}, req.user?.username);
-  const lines = (t) => String(t || '').split(/\r?\n/).filter(Boolean);
-  const b = new Set(lines(before.BlockList).map((l) => l.split('#')[0].trim()));
-  const a = new Set(lines(after.BlockList).map((l) => l.split('#')[0].trim()));
-  const added = [...a].filter((x) => !b.has(x));
-  const removed = [...b].filter((x) => !a.has(x));
+/** 清單文字前後差異（只比位址 / @群組，不比備註），操作紀錄用 */
+function listDiff(beforeText, afterText) {
+  const keys = (t) => new Set(String(t || '').split(/\r?\n/).map((l) => l.split('#')[0].trim()).filter(Boolean));
+  const b = keys(beforeText);
+  const a = keys(afterText);
+  return { 筆數: [b.size, a.size], 新增: [...a].filter((x) => !b.has(x)).slice(0, 50), 移除: [...b].filter((x) => !a.has(x)).slice(0, 50) };
+}
+
+async function saveBlockList(req, text) {
+  const { before, after } = await ipSettings.update({ BlockList: text }, req.user?.username);
   await audit.record(req, {
     action: 'UPDATE', targetType: 'IP', targetId: 1, targetName: '全域 IP 黑名單',
-    detail: { 筆數: [b.size, count], 新增: added.slice(0, 50), 移除: removed.slice(0, 50) },
+    detail: listDiff(before.BlockList, after.BlockList),
   });
+  return after;
+}
+
+router.put('/ip-access/settings', wrap(async (req, res) => {
+  res.json(await saveBlockList(req, (req.body || {}).BlockList));
+}));
+
+/* ---------------------------------------------------------- IP 群組（清單中以「@名稱」引用） */
+router.get('/ip-access/groups', wrap(async (req, res) => {
+  res.json({ ...(await ipGroups.list()), limit: ipAccess.MAX_GROUP_ENTRIES });
+}));
+
+const groupAuditName = (g) => `IP 群組 @${g.Name}`;
+
+router.post('/ip-access/groups', wrap(async (req, res) => {
+  const g = await ipGroups.create(req.body || {}, req.user?.username);
+  await audit.record(req, { action: 'CREATE', targetType: 'IP', targetId: g.Id, targetName: groupAuditName(g), detail: { 說明: g.Description, ...listDiff('', g.Entries) } });
+  res.status(201).json(g);
+}));
+
+router.put('/ip-access/groups/:id', wrap(async (req, res) => {
+  const { before, after, usedBy } = await ipGroups.update(req.params.id, req.body || {}, req.user?.username);
+  const detail = { ...audit.diff({ Name: before.Name, Description: before.Description }, { Name: after.Name, Description: after.Description }), ...listDiff(before.Entries, after.Entries) };
+  if (usedBy.length) detail.影響 = usedBy;
+  await audit.record(req, { action: 'UPDATE', targetType: 'IP', targetId: after.Id, targetName: groupAuditName(after), detail });
   res.json(after);
 }));
+
+router.delete('/ip-access/groups/:id', wrap(async (req, res) => {
+  const g = await ipGroups.remove(req.params.id);
+  await audit.record(req, { action: 'DELETE', targetType: 'IP', targetId: g.Id, targetName: groupAuditName(g), detail: listDiff(g.Entries, '') });
+  res.json({ ok: true });
+}));
+
+/* ---------------------------------------------------------- 從 WAF Log 一鍵封鎖 */
+const oneLine = (s, max = 100) => String(s || '').replace(/[\r\n#]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+
+/**
+ * 把位址 / 網段加入全域黑名單或某網域的拒絕清單（只寫資料庫，部署後才生效）
+ * body: { target: '1.2.3.4' 或 '1.2.3.0/24', scope: 'global' | 'rule', domain, remark }
+ */
+router.post('/ip-access/block', wrap(async (req, res) => {
+  const body = req.body || {};
+  const n = ipAccess.normalizeCidr(String(body.target || '').trim());
+  if (n.error) throw new HttpError(400, n.error);
+  const remark = oneLine(body.remark) || `封鎖 ${new Date().toISOString().slice(0, 10)}`;
+  const line = `${n.value}  # ${remark}`;
+  const groupMap = await ipGroups.loadMap();
+
+  if (body.scope === 'global') {
+    const cur = await ipSettings.get();
+    if (cur.missingTable) throw new HttpError(409, '資料庫尚未建立 IpAccessSettings 資料表，請先執行 database/schema.sql');
+    const cover = ipAccess.findCovering(await ipSettings.blockEntries(groupMap), n.value);
+    if (cover) throw new HttpError(409, `${n.value} 已在全域黑名單中（${cover.cidr}${cover.remark ? `，${cover.remark}` : ''}）`);
+    await saveBlockList(req, [cur.BlockList, line].filter(Boolean).join('\n'));
+    return res.json({ ok: true, message: `已把 ${n.value} 加入全域黑名單，部署後生效` });
+  }
+
+  if (body.scope !== 'rule') throw new HttpError(400, '封鎖範圍只能是 global 或 rule');
+  const domain = String(body.domain || '').trim().toLowerCase();
+  const rule = domain && await loadRule((await DomainRule.findOne({ where: { DomainName: domain }, attributes: ['Id'] }))?.Id || 0);
+  if (!rule) throw new HttpError(404, `找不到網域規則：${domain || '（未指定）'}`);
+  if (rule.IpAccessMode === 'allow') {
+    throw new HttpError(400, `${rule.DomainName} 是「只允許清單」模式，清單外的 IP 本來就無法連線；要封鎖清單內的位址請改用全域黑名單，或到網域設定修改清單`);
+  }
+  const before = rule.get({ plain: true });
+  if (before.IpAccessMode === 'deny') {
+    const cover = ipAccess.findCovering(ipAccess.expandEntries(ipAccess.parseList(before.IpAccessList).entries, groupMap).entries, n.value);
+    if (cover) throw new HttpError(409, `${n.value} 已在 ${rule.DomainName} 的拒絕清單中（${cover.cidr}）`);
+  }
+  const listText = before.IpAccessMode === 'deny' ? [before.IpAccessList, line].filter(Boolean).join('\n') : line;
+  const data = { IpAccessMode: 'deny', IpAccessList: listText };
+  await checkRule({ ...before, ...data });
+  finalizeRule(data);
+  await rule.update(data);
+  await audit.record(req, { action: 'UPDATE', targetType: 'RULE', targetId: rule.Id, targetName: rule.DomainName, detail: audit.diff({ ...before }, data) });
+  const note = before.IpAccessMode === 'off' ? '（原本不限制，已改為「拒絕清單」模式）' : '';
+  return res.json({ ok: true, message: `已把 ${n.value} 加入 ${rule.DomainName} 的拒絕清單${note}，部署後生效` });
+}));
+
+/**
+ * WAF Log 每個來源 IP 目前的封鎖狀態（log 視窗顯示「已封鎖」用）
+ * @returns {{ [ip]: { global: string|null, domains: { [domain]: string } } }}
+ */
+const WAF_CLIENT_RE = /, client: ([0-9a-fA-F:.]+), server: ([^,\s]+)/;
+async function wafIpStatus(lines) {
+  const pairs = new Map();
+  lines.forEach((l) => {
+    const m = l.match(WAF_CLIENT_RE);
+    if (!m) return;
+    if (!pairs.has(m[1])) pairs.set(m[1], new Set());
+    pairs.get(m[1]).add(m[2].toLowerCase());
+  });
+  if (!pairs.size) return {};
+  const groupMap = await ipGroups.loadMap();
+  const globalList = await ipSettings.blockEntries(groupMap).catch(() => []);
+  const servers = [...new Set([...pairs.values()].flatMap((s) => [...s]))];
+  const rules = await DomainRule.findAll({ where: { DomainName: servers }, attributes: ['Id', 'DomainName', 'IpAccessMode', 'IpAccessList'] });
+  const acls = new Map(rules.map((r) => {
+    let acl = null;
+    try { acl = ipAccess.ruleAcl(r.get({ plain: true }), groupMap); } catch { /* 群組遺失時視為未知 */ }
+    return [r.DomainName.toLowerCase(), acl];
+  }));
+  const out = {};
+  pairs.forEach((domains, ip) => {
+    const n = ipAccess.normalizeCidr(ip);
+    if (n.error) return;
+    const g = ipAccess.findCovering(globalList, n.value);
+    const d = {};
+    domains.forEach((dom) => {
+      const acl = acls.get(dom);
+      if (!acl) return;
+      const c = ipAccess.findCovering(acl.entries, n.value);
+      if (acl.mode === 'deny' && c) d[dom] = c.cidr;
+      if (acl.mode === 'allow' && !c) d[dom] = '只允許清單外';
+    });
+    out[ip] = { global: g ? g.cidr : null, domains: d };
+  });
+  return out;
+}
 
 /* =============================================================== 部署 */
 router.get('/deploy/logs', wrap(async (req, res) => {

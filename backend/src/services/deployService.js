@@ -21,6 +21,7 @@ const waf = require('./wafService');
 const wafSettings = require('./wafSettingsService');
 const ipAccess = require('./ipAccessService');
 const ipSettings = require('./ipAccessSettingsService');
+const ipGroups = require('./ipGroupService');
 
 const bus = new EventEmitter();
 bus.setMaxListeners(100);
@@ -95,7 +96,14 @@ async function buildFileSet(log) {
   let defaultCert = null; // 預設站台 443 使用的憑證
   const wafCfg = await wafSettings.get();
   const wafDomains = [];
-  const blockList = await ipSettings.blockEntries();
+  // IP 群組：網域清單與全域黑名單中的「@群組」在這裡展開；引用不存在的群組時中止部署（不會產生放行所有人的設定）
+  const ipGroupMap = await ipGroups.loadMap();
+  let blockList;
+  try {
+    blockList = await ipSettings.blockEntries(ipGroupMap);
+  } catch (e) {
+    throw new DeployError('全域 IP 黑名單驗證失敗，已中止部署（未變更任何節點）', { detail: e.message });
+  }
   const ipBlock = blockList.length > 0;
   const aclDomains = [];
   for (const r of rules) {
@@ -107,10 +115,16 @@ async function buildFileSet(log) {
       continue;
     }
     if (new Date(p.certificate.ValidTo) < new Date()) log('warn', `規則 ${p.DomainName} 綁定的憑證「${p.certificate.Alias}」已過期`);
-    confs.set(confFileName(p.DomainName), renderConf(p, { waf: wafCfg, ipBlock }));
+    let acl;
+    try {
+      acl = ipAccess.ruleAcl(p, ipGroupMap);
+      confs.set(confFileName(p.DomainName), renderConf(p, { waf: wafCfg, ipBlock, ipGroups: ipGroupMap }));
+    } catch (e) {
+      problems.push(`${p.DomainName}：${e.message}`);
+      continue;
+    }
     if (waf.ruleWafActive(p, wafCfg)) wafDomains.push(`${p.DomainName}（${waf.WAF_MODE_LABEL[p.WafMode]}）`);
-    const acl = ipAccess.ruleAcl(p);
-    if (acl) aclDomains.push(`${p.DomainName}（${ipAccess.MODE_LABEL[acl.mode]} ${acl.entries.length} 筆）`);
+    if (acl) aclDomains.push(`${p.DomainName}（${ipAccess.MODE_LABEL[acl.mode]} ${acl.entries.length} 筆${acl.groups.length ? `，含 ${acl.groups.map((g) => `@${g}`).join(' ')}` : ''}）`);
     if (!p.IsMaintenance) {
       upstreamsOf(p).filter((u) => u.IsActive !== false).forEach((u) => {
         const key = `${String(u.Host).toLowerCase()}:${u.Port}`;
