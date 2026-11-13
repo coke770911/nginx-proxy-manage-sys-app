@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection, Download, Document } from '@element-plus/icons-vue';
+import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection, Download, Document, Aim } from '@element-plus/icons-vue';
 import api, { eventsUrl, session, logout } from '../api';
 
 /* ------------------------------------------------------------------ 資料 */
@@ -123,6 +123,7 @@ const AUDIT_ACTION = {
   DELETE: { type: 'danger', text: '刪除' },
   RENEW: { type: 'warning', text: '憑證續約' },
   DEPLOY: { type: 'info', text: '部署' },
+  CUTOVER_CHECK: { type: 'info', text: '切換前檢查' },
 };
 const AUDIT_TARGET = { AUTH: '登入', RULE: '網域規則', CERT: 'SSL 憑證', NODE: 'Nginx 節點', DEPLOY: '部署', ACCOUNT: '帳號管理' };
 const audit = reactive({ q: '', action: '', targetType: '', range: null, page: 1, pageSize: 50, total: 0, rows: [], loading: false });
@@ -406,6 +407,64 @@ async function runProbe(title, request) {
     probeDlg.loading = false;
   }
 }
+/* ------------------------------------------------------------------ 切換前檢查（DNS 改指 F5 VIP 前的模擬測試） */
+const cutoverCfg = ref({ enabled: false, vip: null });
+const ruleSelection = ref([]);
+const cutDlg = reactive({ visible: false, loading: false, error: '', data: null, count: 0, filter: 'all' });
+const CUT_VERDICT = {
+  pass: { type: 'success', text: '可以切換' },
+  warn: { type: 'warning', text: '有警告' },
+  fail: { type: 'danger', text: '不要切換' },
+  skip: { type: 'info', text: '略過' },
+};
+const CUT_ISSUE = { fail: 'danger', warn: 'warning', info: 'info' };
+const cutResults = computed(() => {
+  const list = cutDlg.data?.results || [];
+  return cutDlg.filter === 'all' ? list : list.filter((r) => r.verdict === cutDlg.filter);
+});
+const cutCount = (v) => (cutDlg.data?.results || []).filter((r) => r.verdict === v).length;
+const cutPassDomains = computed(() => (cutDlg.data?.results || []).filter((r) => r.verdict === 'pass' && !r.dns?.switched).map((r) => r.domain));
+const cutDnsText = (r) => {
+  if (!r.dns) return '—';
+  if (r.dns.switched) return '已指向 VIP';
+  if (!r.dns.ips.length) return r.dns.error || '查無紀錄';
+  return `${r.dns.cname ? `CNAME ${r.dns.cname} → ` : ''}${r.dns.ips.join(', ')}`;
+};
+const cutStatusText = (list) => {
+  const m = new Map();
+  list.forEach((x) => { const k = x.status || '失敗'; m.set(k, (m.get(k) || 0) + 1); });
+  return [...m].map(([k, n]) => (n > 1 ? `${k} ×${n}` : `${k}`)).join('、');
+};
+
+async function loadCutoverCfg() {
+  try { cutoverCfg.value = await api.get('/cutover/config'); } catch { /* 功能設定讀不到時按鈕維持停用 */ }
+}
+async function runCutoverCheck(rows) {
+  if (!cutoverCfg.value.enabled) {
+    ElMessage.warning('尚未設定 F5 VIP：請在 backend/.env 設定 CUTOVER_VIP 後重新啟動服務');
+    return;
+  }
+  const ids = rows.map((r) => r.Id);
+  if (ids.length > 50) { ElMessage.warning('一次最多檢查 50 筆規則'); return; }
+  Object.assign(cutDlg, { visible: true, loading: true, error: '', data: null, count: ids.length, filter: 'all' });
+  try {
+    cutDlg.data = await api.post('/rules/cutover-check', { ids }, { timeout: 600000 });
+  } catch (e) {
+    cutDlg.error = e.message;
+  } finally {
+    cutDlg.loading = false;
+  }
+}
+async function copyPassDomains() {
+  const text = cutPassDomains.value.join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success(`已複製 ${cutPassDomains.value.length} 個網域`);
+  } catch {
+    ElMessageBox.alert(`<pre style="margin:0">${text}</pre>`, '可以切換的網域', { dangerouslyUseHTMLString: true });
+  }
+}
+
 /* ------------------------------------------------------------------ 規則匯入 / 匯出（CSV） */
 const IMPORT_TEMPLATE = [
   '來源網域,後端主機,分配方式,Cookie名稱,SSL憑證,強制HTTPS,WebSocket,上傳上限,啟用,維護中,備註',
@@ -722,6 +781,7 @@ async function showLog(row) {
 
 onMounted(() => {
   loadAll();
+  loadCutoverCfg();
   // 每 30 秒讀一次後端燈號（只讀伺服器記憶體中的結果，負擔極小）
   backendTimer = setInterval(loadBackendStatus, 30000);
 });
@@ -783,6 +843,11 @@ onMounted(() => {
           <el-button type="primary" :icon="Plus" @click="openRule(null)">新增規則</el-button>
           <el-button :icon="Upload" @click="openImport">匯入</el-button>
           <el-button :icon="Download" @click="exportRules">匯出</el-button>
+          <el-button :icon="Aim" :disabled="!ruleSelection.length || !cutoverCfg.enabled"
+                     :title="cutoverCfg.enabled ? `模擬 DNS 改指 ${cutoverCfg.vip} 後的連線結果（唯讀）` : '尚未設定 CUTOVER_VIP'"
+                     @click="runCutoverCheck(ruleSelection)">
+            切換前檢查{{ ruleSelection.length ? `（${ruleSelection.length}）` : '' }}
+          </el-button>
           <span class="hint">修改後需按右上角「一鍵同步部署」才會推送到 Nginx 節點。</span>
         </div>
         <div class="toolbar search-bar">
@@ -793,7 +858,9 @@ onMounted(() => {
             <template v-else>共 <b>{{ rules.length }}</b> 筆</template>
           </span>
         </div>
-        <el-table :data="filteredRules" stripe border style="width: 100%" :empty-text="ruleQuery ? '查無符合的規則' : '尚無規則'">
+        <el-table :data="filteredRules" stripe border style="width: 100%" :empty-text="ruleQuery ? '查無符合的規則' : '尚無規則'"
+                  row-key="Id" @selection-change="(v) => (ruleSelection = v)">
+          <el-table-column type="selection" width="42" fixed align="center" />
           <el-table-column prop="DomainName" label="來源網域" min-width="200" fixed>
             <template #default="{ row }">
               <!-- 萬用字元網域（*.xxx）無法直接開啟，只顯示文字 -->
@@ -849,8 +916,11 @@ onMounted(() => {
               <div class="idle-days" :class="{ long: idleDays(row.UpdatedAt) >= 180 }">{{ idleText(row.UpdatedAt) }}</div>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="220" fixed="right" align="center">
+          <el-table-column label="操作" width="260" fixed="right" align="center">
             <template #default="{ row }">
+              <el-button size="small" :icon="Aim" circle :disabled="!cutoverCfg.enabled"
+                         :title="cutoverCfg.enabled ? `切換前檢查：模擬 DNS 改指 ${cutoverCfg.vip}` : '切換前檢查（尚未設定 CUTOVER_VIP）'"
+                         @click="runCutoverCheck([row])" />
               <el-button size="small" :icon="Connection" circle title="從節點測試後端連線" @click="probeRule(row)" />
               <el-button size="small" :icon="View" circle title="預覽 Nginx 設定" @click="previewRule(row)" />
               <el-button size="small" :icon="Edit" circle title="編輯" @click="openRule(row)" />
@@ -1160,6 +1230,88 @@ onMounted(() => {
       <template #footer><el-button @click="probeDlg.visible = false">關閉</el-button></template>
     </el-dialog>
 
+    <!-- 切換前檢查結果 -->
+    <el-dialog v-model="cutDlg.visible" :title="`切換前檢查（模擬 DNS 改指 ${cutoverCfg.vip || 'VIP'}）`" width="960px" class="rwd-dialog" append-to-body>
+      <div v-loading="cutDlg.loading" :element-loading-text="`檢查 ${cutDlg.count} 筆規則中，每個網域約需數秒…`" class="cut-body">
+        <el-alert v-if="cutDlg.error" type="error" :closable="false" show-icon :title="cutDlg.error" />
+        <template v-else-if="cutDlg.data">
+          <div class="cut-summary">
+            <el-radio-group v-model="cutDlg.filter" size="small">
+              <el-radio-button value="all">全部 {{ cutDlg.data.results.length }}</el-radio-button>
+              <el-radio-button value="pass">可以切換 {{ cutCount('pass') }}</el-radio-button>
+              <el-radio-button value="warn">有警告 {{ cutCount('warn') }}</el-radio-button>
+              <el-radio-button value="fail">不要切換 {{ cutCount('fail') }}</el-radio-button>
+              <el-radio-button v-if="cutCount('skip')" value="skip">略過 {{ cutCount('skip') }}</el-radio-button>
+            </el-radio-group>
+            <span class="hint">檢查時間：{{ fmt(cutDlg.data.checkedAt) }}</span>
+          </div>
+          <el-table :data="cutResults" border style="width: 100%" row-key="domain">
+            <el-table-column type="expand">
+              <template #default="{ row }">
+                <div class="cut-detail">
+                  <template v-if="row.vip">
+                    <div><b>經 VIP https</b>（{{ row.vip.https.length }} 次）：
+                      <span v-for="(x, i) in row.vip.https" :key="i" class="cut-req">{{ x.status || x.error }}<small> · {{ x.size }} B · {{ x.ms }} ms</small></span>
+                    </div>
+                    <div v-if="row.vip.follow.length > 1"><b>轉址過程</b>：
+                      <span v-for="(f, i) in row.vip.follow" :key="i">{{ i ? ' → ' : '' }}{{ f.status }} {{ f.url }}</span>
+                    </div>
+                    <div><b>經 VIP http</b>：{{ row.vip.http.status || row.vip.http.error }}<template v-if="row.vip.http.location"> → {{ row.vip.http.location }}</template></div>
+                    <div v-if="row.vip.cert"><b>憑證</b>：{{ row.vip.cert.subject }}（到期 {{ row.vip.cert.validTo }}）
+                      {{ row.vip.cert.matches ? '涵蓋此網域' : '不涵蓋此網域' }}、{{ row.vip.cert.trusted ? '憑證鏈有效' : row.vip.cert.trustError }}</div>
+                  </template>
+                  <div v-if="row.current"><b>現行路徑</b>（{{ row.current.scheme }}://{{ row.current.ip }}）：
+                    {{ row.current.status || row.current.error }}<template v-if="row.current.finalStatus !== row.current.status"> → 最終 {{ row.current.finalStatus }}</template>，{{ row.current.size }} B</div>
+                  <div v-if="row.nodes && row.nodes.length"><b>各節點直連</b>：
+                    <span v-for="n in row.nodes" :key="n.node" class="cut-req">{{ n.node }}：{{ n.status || n.error }}{{ n.defaultSite ? '（404 預設頁）' : '' }}</span>
+                  </div>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="網域" min-width="200">
+              <template #default="{ row }"><span class="mono">{{ row.domain }}</span></template>
+            </el-table-column>
+            <el-table-column label="判定" width="100" align="center">
+              <template #default="{ row }"><el-tag :type="CUT_VERDICT[row.verdict].type" effect="dark">{{ CUT_VERDICT[row.verdict].text }}</el-tag></template>
+            </el-table-column>
+            <el-table-column label="DNS 現況" min-width="170">
+              <template #default="{ row }">
+                <el-tag v-if="row.dns && row.dns.switched" size="small" type="success">已指向 VIP</el-tag>
+                <span v-else class="mono small">{{ cutDnsText(row) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="經 VIP" min-width="130">
+              <template #default="{ row }"><span class="mono small">{{ row.vip ? cutStatusText(row.vip.https) : '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="原因" min-width="300">
+              <template #default="{ row }">
+                <div v-if="!row.issues.length" class="cut-ok">全部檢查通過</div>
+                <div v-for="(it, i) in row.issues" :key="i" class="cut-issue">
+                  <el-tag size="small" :type="CUT_ISSUE[it.level]">{{ it.level === 'fail' ? '失敗' : it.level === 'warn' ? '警告' : '說明' }}</el-tag>
+                  <span>{{ it.text }}</span>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div v-if="cutPassDomains.length" class="cut-pass">
+            <span>可以切換、DNS 尚未改的網域（{{ cutPassDomains.length }}）：<span class="mono">{{ cutPassDomains.join('、') }}</span></span>
+            <el-button size="small" @click="copyPassDomains">複製清單</el-button>
+          </div>
+          <el-alert type="info" :closable="false" show-icon class="cut-manual"
+                    title="以下項目無法自動判斷，切換前請與系統管理者確認">
+            <ul>
+              <li>後端是否以「來源 IP」限制存取：切換後後端看到的是 Nginx 節點 IP，請改信任 X-Real-IP / X-Forwarded-For</li>
+              <li>是否有超過「上傳上限」的檔案上傳（超過會出現 413）</li>
+              <li>網頁中是否寫死 IP 或非 80 / 443 的網址、是否需要 WebSocket</li>
+            </ul>
+          </el-alert>
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="cutDlg.visible = false">關閉</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 帳號編輯 -->
     <el-dialog v-model="accDlg.visible" :title="accDlg.id ? '編輯帳號' : '新增帳號'" width="480px" class="rwd-dialog">
       <el-form ref="accFormRef" :model="accDlg.form" :rules="accRules" label-width="100px">
@@ -1391,6 +1543,20 @@ onMounted(() => {
 .domain-link:hover { text-decoration: underline; }
 .date-cell { font-size: 12px; color: #606266; white-space: nowrap; }
 .idle-days { font-size: 12px; color: #909399; white-space: nowrap; }
+.cut-body { min-height: 160px; }
+.cut-summary { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.cut-summary .hint { margin-left: auto; }
+.cut-issue { display: flex; align-items: flex-start; gap: 6px; line-height: 1.6; margin: 2px 0; font-size: 13px; }
+.cut-issue .el-tag { flex: none; }
+.cut-ok { color: var(--el-color-success); font-size: 13px; }
+.cut-detail { padding: 4px 16px; font-size: 13px; line-height: 1.9; color: #606266; word-break: break-all; }
+.cut-req { display: inline-block; margin-right: 12px; }
+.cut-req small { color: #909399; }
+.cut-pass { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 12px; padding: 8px 12px; background: var(--el-color-success-light-9); border-radius: 4px; font-size: 13px; }
+.cut-manual { margin-top: 12px; }
+.cut-manual ul { margin: 4px 0 0; padding-left: 18px; }
+.mono { font-family: Consolas, 'Courier New', monospace; }
+.mono.small, .small { font-size: 12px; }
 .idle-days.long { color: #e6a23c; }
 .node-tools { display: flex; align-items: center; gap: 12px; flex: none; }
 .node-tools .el-button + .el-button { margin-left: 0; }

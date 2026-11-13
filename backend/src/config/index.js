@@ -76,6 +76,14 @@ module.exports = {
       return { enabled: from.length > 0, from, httpPort, httpsPort };
     })(),
   },
+  // 切換前檢查：DNS 準備改指的 F5 VIP（IPv4），留空 = 停用此功能
+  cutover: (() => {
+    const vip = (process.env.CUTOVER_VIP || '').trim();
+    if (vip && !/^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(vip)) {
+      throw new Error(`.env 設定 CUTOVER_VIP 必須為 IPv4 位址：${vip}`);
+    }
+    return { enabled: !!vip, vip };
+  })(),
   healthIntervalSec: parseInt(process.env.HEALTH_INTERVAL_SEC || '60', 10),
   db: {
     host: process.env.DB_HOST || '127.0.0.1',

@@ -484,6 +484,7 @@ function renderDefaultConf(certId) {
     '        default_type text/html;',
     '        charset utf-8;',
     '        add_header Cache-Control "no-store" always;',
+    '        add_header X-NPM-Default "1" always;  # 切換前檢查用：辨識「沒有對應規則」',
     ...returnHtml('404', notFoundHtml()).map((l) => `        ${l}`),
     '    }',
   ];

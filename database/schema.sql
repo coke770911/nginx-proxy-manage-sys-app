@@ -155,7 +155,7 @@ GO
 
 /* ---------------------------------------------------------------------------
    5. AuditLogs — 系統操作紀錄
-      Action: LOGIN / LOGIN_FAILED / CREATE / UPDATE / DELETE / RENEW / DEPLOY
+      Action: LOGIN / LOGIN_FAILED / CREATE / UPDATE / DELETE / RENEW / DEPLOY / CUTOVER_CHECK
       TargetType: AUTH / RULE / CERT / NODE / DEPLOY
       Detail: 變更內容 (JSON)，不含密碼、私鑰與憑證內容
    --------------------------------------------------------------------------- */

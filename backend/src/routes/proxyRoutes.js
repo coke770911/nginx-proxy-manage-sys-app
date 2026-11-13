@@ -13,6 +13,8 @@ const { fetchHostFingerprint } = require('../services/sshSession');
 const backendProbe = require('../services/backendProbe');
 const ruleImport = require('../services/ruleImport');
 const nodeLog = require('../services/nodeLogService');
+const cutoverCheck = require('../services/cutoverCheck');
+const config = require('../config');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 3 } });
@@ -417,6 +419,40 @@ router.post('/rules/:id/test-backends', wrap(async (req, res) => {
   if (!rule) throw new HttpError(404, '規則不存在');
   const plain = rule.get({ plain: true });
   res.json({ domain: plain.DomainName, ...(await testBackends(upstreamsOf(plain).filter((u) => u.IsActive !== false))) });
+}));
+
+/* =============================================================== 切換前檢查 */
+router.get('/cutover/config', (req, res) => res.json({ enabled: config.cutover.enabled, vip: config.cutover.vip || null }));
+
+/**
+ * 切換前檢查（唯讀）：模擬 DNS 改指 VIP 後的連線結果
+ * POST /rules/cutover-check  body: { ids: [規則 Id, ...] }（最多 50 筆）
+ */
+let cutoverRunning = false;
+router.post('/rules/cutover-check', wrap(async (req, res) => {
+  if (!config.cutover.enabled) throw new HttpError(400, '尚未設定 F5 VIP：請在 backend/.env 設定 CUTOVER_VIP 後重新啟動服務');
+  const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  if (!ids.length) throw new HttpError(400, '請選擇要檢查的規則');
+  if (ids.length > cutoverCheck.MAX_BATCH) throw new HttpError(400, `一次最多檢查 ${cutoverCheck.MAX_BATCH} 筆規則`);
+  if (cutoverRunning) throw new HttpError(409, '已有切換前檢查正在執行，請稍候再試');
+  cutoverRunning = true;
+  try {
+    const rules = (await DomainRule.findAll({ where: { Id: ids }, include: [withUpstreams], order: [['DomainName', 'ASC'], ...UP_ORDER] }))
+      .map((r) => r.get({ plain: true }));
+    if (!rules.length) throw new HttpError(404, '找不到指定的規則');
+    const nodes = await ProxyNode.findAll({ where: { IsActive: true }, order: [['Id', 'ASC']] });
+    const out = await cutoverCheck.checkRules(rules, nodes);
+    const count = (v) => out.results.filter((r) => r.verdict === v).length;
+    await audit.record(req, {
+      action: 'CUTOVER_CHECK',
+      targetType: 'RULE',
+      targetName: rules.map((r) => r.DomainName).join(', '),
+      detail: { VIP: out.vip, 可切換: count('pass'), 警告: count('warn'), 不可切換: count('fail'), 略過: count('skip') },
+    });
+    res.json(out);
+  } finally {
+    cutoverRunning = false;
+  }
 }));
 
 /** 預覽該規則將生成的 Nginx 設定檔 */
