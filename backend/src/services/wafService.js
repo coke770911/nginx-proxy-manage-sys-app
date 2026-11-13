@@ -10,7 +10,8 @@
  *
  * 安全：插入設定檔的值只來自白名單（模式三選一、數字），不開放自訂 ModSecurity 規則文字
  *       （SecRule 可透過 exec 等動作執行程式，絕不能讓使用者輸入規則）。
- * 稽核紀錄（audit log）關閉：會記下 POST 內容（含登入密碼）；事件改由 nginx error.log 的「ModSecurity:」行查看。
+ * 稽核紀錄（audit log）關閉：會記下 POST 內容（含登入密碼）；事件改由 waf.log（info 等級，含個別規則 ID）查看，
+ * 阻擋結果（949110）另外也會出現在 error.log。
  */
 const config = require('../config');
 
@@ -21,6 +22,7 @@ const RULE_ID_RE = /^\d{6,7}$/; // CRS 規則 ID 為 6 位數（9xxxxx），保�
 
 const WAF_CONF_NAME = '_waf.conf';
 const WAF_RULES_NAME = '_waf_main.rules';
+const WAF_LOG_NAME = 'waf.log'; // 位於 REMOTE_LOG_DIR（/var/log/nginx），沿用該目錄的 ACL 與 logrotate（保留一年）
 
 /** 節點上必須存在的檔案（由 sysadmin 以 apt 安裝；deployer 只需讀取） */
 const NODE_PATHS = {
@@ -115,7 +117,7 @@ function renderWafRules(settings) {
     'SecCookieFormat 0',
     `SecUnicodeMapFile ${NODE_PATHS.unicode} 20127`,
     'SecStatusEngine Off',
-    '# 稽核紀錄關閉（會記錄 POST 內容與密碼）；命中規則會寫入 nginx error.log',
+    '# 稽核紀錄關閉（會記錄 POST 內容與密碼）；命中規則寫入 nginx waf.log（info），阻擋結果另見 error.log',
     'SecAuditEngine Off',
     '',
     '# ---- 請求內容解析（取自 ModSecurity 建議設定）----',
@@ -148,13 +150,17 @@ function serverWafLines(rule, settings) {
   const body = [`SecRuleEngine ${engine}`, ...(ids.length ? [`SecRuleRemoveById ${ids.join(' ')}`] : [])];
   return [
     `    # WAF：${WAF_MODE_LABEL[rule.WafMode]}${ids.length ? `，排除 ${ids.length} 條規則` : ''}`,
+    // ModSecurity-nginx 把每條命中的規則記在 info 等級、只有阻擋結果是 error 等級；
+    // 另寫一份 info 等級的 waf.log 才看得到「僅偵測」的事件與個別規則 ID，error.log 維持原本等級
+    `    error_log ${config.ssh.logDir}/error.log;`,
+    `    error_log ${config.ssh.logDir}/${WAF_LOG_NAME} info;`,
     '    modsecurity on;',
     `    modsecurity_rules '${body.join('\n        ')}';`,
   ];
 }
 
 module.exports = {
-  WAF_MODES, WAF_MODE_LABEL, WAF_CONF_NAME, WAF_RULES_NAME, WAF_CHECK_CMD, NODE_PATHS,
+  WAF_MODES, WAF_MODE_LABEL, WAF_CONF_NAME, WAF_RULES_NAME, WAF_LOG_NAME, WAF_CHECK_CMD, NODE_PATHS,
   parseWafCheck, parseExcludeIds, normalizeExcludeIds, validateRuleWaf, validateSettings, ruleWafActive,
   renderWafConf, renderWafRules, serverWafLines,
 };

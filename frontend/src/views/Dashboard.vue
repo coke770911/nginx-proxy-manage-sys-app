@@ -276,6 +276,14 @@ async function saveWaf() {
 }
 /** 節點 WAF 模組狀態（健康檢查時更新） */
 const nodeWaf = (n) => n.Stats?.waf || null;
+/** 節點版本（OS、nginx、libmodsecurity；健康檢查時更新） */
+const nodeVer = (n) => n.Stats?.versions || null;
+const upstreamVer = (v) => (v ? String(v).replace(/^\d+:/, '').replace(/[-+~].*$/, '') : null); // 3.3.8-1 → 3.3.8
+function wafVerText(n) {
+  const crs = upstreamVer(nodeWaf(n)?.crsVersion);
+  const ms = nodeVer(n)?.modsecurity;
+  return [ms && `ModSecurity ${ms}`, crs && `CRS ${crs}`].filter(Boolean).join(' · ') || '模組已安裝';
+}
 const wafNodesMissing = computed(() => nodes.value.filter((n) => n.IsActive && n.Stats && !n.Stats.error && nodeWaf(n) && !nodeWaf(n).ready));
 /** 規則清單的 WAF 欄位：總開關關閉時以灰色標示「未生效」 */
 function wafTag(r) {
@@ -803,6 +811,8 @@ function toggleNodeLogAuto(on) {
 }
 /** 依內容標示顏色：access.log 看狀態碼，error.log 看等級 */
 function nodeLogClass(line) {
+  // WAF：被阻擋（Access denied）紅色、偵測到（Warning）橘色
+  if (nodeLogDlg.type === 'waf') return /Access denied/.test(line) ? 'error' : 'warn';
   if (nodeLogDlg.type === 'error') {
     if (/\[(emerg|alert|crit|error)\]/.test(line)) return 'error';
     if (/\[warn\]/.test(line)) return 'warn';
@@ -863,9 +873,12 @@ onMounted(() => {
             <div class="node-name">{{ n.NodeName }}</div>
             <div class="node-meta">{{ n.IpAddress }}:{{ n.SshPort }} · {{ n.IsActive ? HEALTH_TEXT[n.HealthStatus] : '已停用' }}</div>
             <div class="node-meta">最後同步：{{ fmt(n.LastSyncAt) }}</div>
+            <div v-if="n.IsActive && nodeVer(n)" class="node-meta" :title="nodeVer(n).os || ''">
+              {{ nodeVer(n).os || 'OS ?' }} · nginx {{ nodeVer(n).nginx || '?' }}
+            </div>
             <div v-if="n.IsActive && nodeWaf(n)" class="node-meta">
               <span :class="nodeWaf(n).ready ? 'waf-ok' : 'waf-miss'">
-                WAF 模組：{{ nodeWaf(n).ready ? `已安裝（CRS ${nodeWaf(n).crsVersion || '?'}）` : '未安裝' }}
+                WAF：{{ nodeWaf(n).ready ? wafVerText(n) : '模組未安裝' }}
               </span>
             </div>
           </div>
@@ -1613,6 +1626,7 @@ onMounted(() => {
         <el-radio-group v-model="nodeLogDlg.type" size="small" @change="loadNodeLog">
           <el-radio-button value="access">存取紀錄 access.log</el-radio-button>
           <el-radio-button value="error">錯誤紀錄 error.log</el-radio-button>
+          <el-radio-button value="waf">WAF 事件 waf.log</el-radio-button>
         </el-radio-group>
         <el-select v-model="nodeLogDlg.lines" size="small" class="nlog-lines" @change="loadNodeLog">
           <el-option v-for="n in NODE_LOG_LINES" :key="n" :label="`最後 ${n} 行`" :value="n" />
@@ -1632,6 +1646,10 @@ onMounted(() => {
           <template v-if="nodeLogDlg.data.keyword">在最後 {{ nodeLogDlg.data.scanned.toLocaleString() }} 行中找到含「{{ nodeLogDlg.data.keyword }}」的 {{ nodeLogDlg.data.lines.length }} 行（最多顯示 {{ nodeLogDlg.data.count }} 行）</template>
           <template v-else>共 {{ nodeLogDlg.data.lines.length }} 行</template>
           · 讀取時間 {{ fmt(nodeLogDlg.data.fetchedAt) }}
+        </div>
+        <div v-if="nodeLogDlg.type === 'waf'" class="hint">
+          橘色 = 命中規則（Warning，僅偵測也會記錄），紅色 = 已阻擋（Access denied，id 949110 為總分判定）。
+          誤判時把同一請求中 <code>[id "…"]</code> 的規則 ID（949110 除外）填入該網域的「WAF 排除規則」。
         </div>
         <div class="logbox nlog-box">
           <div v-if="!nodeLogLines.length" class="logline">（沒有資料）</div>

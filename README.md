@@ -190,6 +190,7 @@ pm2 save          # 記住程序清單，服務重啟後自動還原
 - 每次健康檢查（`HEALTH_INTERVAL_SEC`，預設 60 秒，或按卡片旁的重新檢測）時，用同一條 SSH 連線讀取 `/proc/stat`、`/proc/meminfo`、`/proc/loadavg` 與 `df`，**不需要 sudo**。
 - 使用率低於 70% 綠色、70–90% 黃色、超過 90% 紅色。上傳大檔時 Nginx 會把請求暫存到 `/var/lib/nginx`，請特別注意硬碟剩餘空間。
 - 數據只保存在記憶體，後端重啟後要等下一次檢查才會出現；停用的節點不顯示。
+- 卡片另顯示**版本資訊**：作業系統（`/etc/os-release`，例：`Ubuntu 26.04.1 LTS`）、nginx 版本（`nginx -v`），以及 WAF 的 ModSecurity（`libmodsecurity3t64`）與 OWASP CRS（`modsecurity-crs`）版本，例：`WAF：ModSecurity 3.0.14 · CRS 3.3.8`；一樣在健康檢查時以 deployer 唯讀讀取，不需要 sudo。兩台版本不一致時請先更新到相同版本再部署。
 
 ## 網域規則搜尋
 
@@ -387,7 +388,7 @@ sudo apt-get update && sudo apt-get -y install libnginx-mod-http-modsecurity mod
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-只載入模組、不檢查任何請求，網站不受影響。節點卡片會顯示「WAF 模組：已安裝（CRS 3.3.x）」。
+只載入模組、不檢查任何請求，網站不受影響。節點卡片會顯示「WAF：ModSecurity 3.0.x · CRS 3.3.x」。
 
 **2. 管理介面設定**
 
@@ -403,7 +404,12 @@ sudo nginx -t && sudo systemctl reload nginx
 - 有網域開啟 WAF 時，部署連線後會先檢查所有節點是否已安裝模組，**任一節點未安裝即在寫入前中止**；設定檔照樣經過「全部節點 `nginx -t` 通過才 reload、失敗回滾」。
 - `/f5-health-check` 與維護中頁面不經過 WAF。
 - 大型上傳只檢查前段（`SecRequestBodyLimitAction ProcessPartial`），不會因檔案大而被擋。
-- WAF 事件寫入 Nginx `error.log`（「檢視 Nginx Log」搜尋 `ModSecurity`）；**audit log 關閉**，避免記下 POST 內容與密碼。
+- WAF 事件寫入 `/var/log/nginx/waf.log`（「檢視 Nginx Log」→「WAF 事件」）：ModSecurity 把個別規則命中記在 info 等級，所以 WAF 網域另寫一份 info 等級的 `waf.log`；`error.log` 等級不變，只會出現阻擋結果（`949110 Access denied`）。**audit log 關閉**，避免記下 POST 內容與密碼。
+- 部署（reload）後約 5 秒內舊 worker 可能仍在處理連線，測試 WAF 請稍候再測。
+
+**設定優先順序**：總開關 → 網域維護模式 → 網域 WAF 模式 → 全域嚴格程度（決定載入哪些規則）→ **網域排除規則 ID（優先於全域，只影響該網域）** → 全域門檻。已實測：排除 942100 後 SQL 注入測試放行、XSS 仍被擋；嚴格程度調到 3 時 942100 仍不執行，但會有新的 PL2 規則命中。詳見操作手冊第 3-3 節。
+
+**WAF 檢查與阻擋的項目**：各規則代碼（911 方法、920 協定、930 LFI、932 RCE、941 XSS、942 SQLi…）代表的行為、計分方式、預設允許 / 禁止清單（方法、Content-Type、副檔名、標頭）、常見誤擋情況與目前未作用的規則，見操作手冊第 7 節。
 
 **4. 安全設計**：管理介面只開放模式三選一、數字規則 ID、嚴格程度 1–4、門檻 1–100，全部經白名單驗證；不提供自訂 ModSecurity 規則（規則語法可執行外部程式）。deployer 不需新增任何 sudo 權限。WAF 設定變更寫入操作紀錄（類別「WAF 設定」）。
 
@@ -478,10 +484,10 @@ tr -d '\r' < .claude/skills/nginx-node-ops/node-audit.sh | ssh -i <私鑰> -o Ba
 
 節點卡片或「Nginx 節點」分頁的文件圖示按鈕可開啟 **Nginx Log** 視窗，透過 SSH 即時讀取該節點的 Log（唯讀）：
 
-- **存取紀錄** `access.log` / **錯誤紀錄** `error.log`，可選最後 100 / 200 / 500 / 1000 / 2000 行。
+- **存取紀錄** `access.log` / **錯誤紀錄** `error.log` / **WAF 事件** `waf.log`（只顯示 ModSecurity 紀錄，偵測以橘色、阻擋以紅色標示），可選最後 100 / 200 / 500 / 1000 / 2000 行。
 - **關鍵字搜尋**：從最後 50,000 行中找含關鍵字的行（不分大小寫、固定字串比對，例如 IP、網址、` 502 `）。
 - 可勾選每 5 秒自動更新、最新的在最上面；access.log 的 4xx 以黃色、5xx 以紅色標示，error.log 依等級（warn / error）標示。
-- 只能讀白名單中的兩個檔案（目錄由 `.env` 的 `REMOTE_LOG_DIR` 設定，預設 `/var/log/nginx`）；關鍵字以單引號包起來交給 `grep -F`，並禁止控制字元，避免指令注入。單次最多回傳 2 MB。
+- 只能讀白名單中的三個檔案（目錄由 `.env` 的 `REMOTE_LOG_DIR` 設定，預設 `/var/log/nginx`）；關鍵字以單引號包起來交給 `grep -F`，並禁止控制字元，避免指令注入。單次最多回傳 2 MB。
 
 **節點權限（每台執行一次）**：Ubuntu 的 Nginx Log 屬於 `www-data:adm`、權限 640，`deployer` 預設讀不到（視窗會顯示以下指令）。不建議把 `deployer` 加入 `adm` 群組（可讀 `auth.log` 等所有系統 Log），改用 ACL 只開放 `/var/log/nginx`，並設預設 ACL 讓 logrotate 新建的檔案自動繼承。以 sysadmin 登入節點執行：
 
@@ -498,7 +504,7 @@ sudo setfacl -m u:deployer:r /var/log/nginx/*.log
 
 Ubuntu 預設只保留 14 天。節點改為由 logrotate **保留一年**：每天切一份新檔、隔天壓縮（gzip，約剩一成），檔名附日期（例 `access.log-20261112.gz`），超過 365 天自動刪除（`rotate 365` + `maxage 365`）。新檔案會繼承上面的 ACL，管理介面仍可讀取。
 
-- 管理介面的「檢視 Log」只讀目前的 `access.log` / `error.log`（當天）；較舊的紀錄需登入節點以 `zcat` / `zgrep` 查詢。
+- 管理介面的「檢視 Log」只讀目前的 `access.log` / `error.log` / `waf.log`（當天）；較舊的紀錄需登入節點以 `zcat` / `zgrep` 查詢。
 - 以目前流量估算一年僅數 MB；即使流量放大百倍也只約數 GB，節點硬碟（144 GB）足夠。
 - 新建節點時，`node-setup.sh` 的步驟 7c 會寫入此設定；既有節點以 sysadmin 執行一次：
 

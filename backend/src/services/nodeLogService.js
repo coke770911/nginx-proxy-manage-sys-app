@@ -2,14 +2,16 @@
 /**
  * 讀取節點上的 Nginx Log（唯讀）。
  *
- * - 檔案只能是白名單中的 access.log / error.log，路徑不接受使用者輸入。
+ * - 檔案只能是白名單中的 access.log / error.log / waf.log，路徑不接受使用者輸入。
  * - 關鍵字以單引號包起來交給 grep -F（固定字串比對，不是正規表示式），並先過濾控制字元與長度，避免指令注入。
  * - deployer 預設讀不到 /var/log/nginx（www-data:adm 640），需在節點以 ACL 授權，見 README「檢視節點 Nginx Log」。
  */
 const config = require('../config');
 const { NodeSession } = require('./sshSession');
 
-const LOG_FILES = { access: 'access.log', error: 'error.log' };
+// waf：開啟 WAF 的網域另寫 info 等級的 waf.log（見 wafService），只顯示 ModSecurity 事件
+const LOG_FILES = { access: 'access.log', error: 'error.log', waf: 'waf.log' };
+const LOG_FILTER = { waf: 'ModSecurity' };
 const LINE_CHOICES = [100, 200, 500, 1000, 2000];
 const SEARCH_SCAN_LINES = 50000; // 有關鍵字時，從最後這麼多行中搜尋
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -28,7 +30,7 @@ class LogError extends Error {
 }
 
 function normalizeOptions({ type, lines, q }) {
-  if (!LOG_FILES[type]) throw new LogError(400, 'Log 類型只能是 access 或 error');
+  if (!LOG_FILES[type]) throw new LogError(400, 'Log 類型只能是 access、error 或 waf');
   const n = Number(lines) || 200;
   const count = LINE_CHOICES.includes(n) ? n : 200;
   const keyword = String(q || '').trim();
@@ -51,8 +53,10 @@ const PERMISSION_HINT = [
 async function readNodeLog(node, opts) {
   const { type, count, keyword } = normalizeOptions(opts);
   const file = `${config.ssh.logDir}/${LOG_FILES[type]}`;
-  const cmd = keyword
-    ? `tail -n ${SEARCH_SCAN_LINES} -- ${shellQuote(file)} | grep -F -i -- ${shellQuote(keyword)} | tail -n ${count}`
+  // 固定過濾（waf.log 只看 ModSecurity 事件，略過 info 等級的其他雜訊）+ 使用者關鍵字
+  const filters = [LOG_FILTER[type], keyword].filter(Boolean).map((k) => `grep -F -i -- ${shellQuote(k)}`);
+  const cmd = filters.length
+    ? `tail -n ${SEARCH_SCAN_LINES} -- ${shellQuote(file)} | ${filters.join(' | ')} | tail -n ${count}`
     : `tail -n ${count} -- ${shellQuote(file)}`;
 
   const s = new NodeSession(node);
@@ -63,12 +67,12 @@ async function readNodeLog(node, opts) {
     const state = chk.stdout.trim();
     // 不用 403：前端遇 401/403 會視為登入失效而登出
     if (state === 'DENIED') throw new LogError(409,`無法讀取 ${file}（權限不足）`, PERMISSION_HINT);
-    if (state === 'MISSING') throw new LogError(404, `節點上找不到 ${file}`);
+    if (state === 'MISSING') throw new LogError(404, type === 'waf' ? `節點上還沒有 ${file}（尚未有網域開啟 WAF 並部署）` : `節點上找不到 ${file}`);
     const r = await s.exec(cmd, 30000);
     if (r.stderr.trim()) throw new LogError(502, `讀取 Log 失敗：${r.stderr.trim().slice(0, 300)}`);
     const text = r.stdout.length > MAX_OUTPUT_BYTES ? r.stdout.slice(-MAX_OUTPUT_BYTES) : r.stdout;
     const lines = text.split('\n').filter((l) => l !== '').map((l) => (l.length > MAX_LINE_CHARS ? `${l.slice(0, MAX_LINE_CHARS)}…` : l));
-    return { file, lines, count, keyword, scanned: keyword ? SEARCH_SCAN_LINES : count, fetchedAt: new Date().toISOString() };
+    return { file, lines, count, keyword, scanned: filters.length ? SEARCH_SCAN_LINES : count, fetchedAt: new Date().toISOString() };
   } catch (e) {
     if (e instanceof LogError) throw e;
     throw new LogError(502, `無法連線節點讀取 Log：${String(e.message || e).slice(0, 300)}`);

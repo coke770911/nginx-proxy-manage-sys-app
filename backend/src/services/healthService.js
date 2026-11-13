@@ -31,6 +31,21 @@ async function loadBackendTargets() {
   return backendProbe.cleanTargets(list, MAX_BACKENDS);
 }
 
+// 版本資訊（唯讀，不需 sudo）：VER:<OS 名稱>|<nginx 版本>|<libmodsecurity 版本>
+// libmodsecurity 套件名稱在 24.04 起為 libmodsecurity3t64，舊版為 libmodsecurity3
+const VERSION_CMD = 'echo "VER:$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")|'
+  + '$(/usr/sbin/nginx -v 2>&1 | sed -n \'s#^nginx version: nginx/##p\')|'
+  + '$(dpkg-query -W -f=\'${Version}\' libmodsecurity3t64 2>/dev/null || dpkg-query -W -f=\'${Version}\' libmodsecurity3 2>/dev/null)"';
+
+/** 解析 VER 行；版本號只取到上游版本（3.0.14-1build1 → 3.0.14） */
+function parseVersions(out) {
+  const m = String(out || '').match(/^VER:([^|\n]*)\|([^|\n]*)\|([^|\n]*)$/m);
+  if (!m) return null;
+  const clean = (v) => (v || '').trim().replace(/^\d+:/, '').replace(/[-+~].*$/, '') || null;
+  // nginx -v：「1.28.3 (Ubuntu)」→ 1.28.3
+  return { os: m[1].trim() || null, nginx: m[2].trim().split(/\s+/)[0] || null, modsecurity: clean(m[3]) };
+}
+
 // CPU 取兩次 /proc/stat 相隔 1 秒計算使用率；df 檢查 / 與 nginx 暫存目錄所在分割區
 const STATS_CMD = [
   'head -n1 /proc/stat',
@@ -41,6 +56,7 @@ const STATS_CMD = [
   'nproc',
   'df -Pk / 2>/dev/null | tail -n1',
   WAF_CHECK_CMD, // WAF 模組是否已安裝（唯讀檢查檔案）
+  VERSION_CMD,
 ].join('; ');
 
 const stats = new Map(); // nodeId -> { cpu, mem, swap, disk, load, cores, at }
@@ -76,7 +92,7 @@ function parseStats(out) {
     const avail = Number(p[3]) * 1024;
     disk = { mount: '/', total, used, free: avail, percent: pct(used, used + avail) };
   }
-  return { cpu, mem, swap, disk, load, cores, waf: parseWafCheck(out) };
+  return { cpu, mem, swap, disk, load, cores, waf: parseWafCheck(out), versions: parseVersions(out) };
 }
 
 /** 記錄某節點對後端的測試結果；results 為 null 表示該節點這輪無法測試（清除舊結果，避免顯示過期燈號） */
@@ -175,4 +191,4 @@ function startScheduler() {
   setInterval(tick, sec * 1000).unref();
 }
 
-module.exports = { checkAllNodes, listNodes, startScheduler, parseStats, getBackendStatus };
+module.exports = { checkAllNodes, listNodes, startScheduler, parseStats, parseVersions, getBackendStatus };
