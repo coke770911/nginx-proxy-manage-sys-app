@@ -4,6 +4,7 @@
  *
  * 欄位（第一列為標題，可用中文或英文欄位名，順序不限）：
  *   來源網域 DomainName（必填）
+ *   網域別名 DomainAliases  同一條規則的其他網域，多個以 ; 或換行分隔；空白 = 新增時沒有別名、覆蓋時保留原值
  *   後端主機 Backends（必填）多台以 ; 或換行分隔，每台格式：
  *       10.0.0.21:8080          一般
  *       10.0.0.22:8080*3        權重 3
@@ -16,7 +17,7 @@
  *   上傳上限 ClientMaxBodySize / 備註 Remark
  * 空白欄位：新增時用預設值，覆蓋既有規則時保留原值。自訂 Nginx 語法不在匯入範圍內（保留原值）。
  */
-const { validateRule } = require('./nginxTemplate');
+const { validateRule, parseAliases, domainsOf } = require('./nginxTemplate');
 const { certCoversDomain } = require('./certService');
 
 const MAX_ROWS = 500;
@@ -24,6 +25,7 @@ const DOMAIN_RE = /^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i
 
 const COLUMNS = [
   { key: 'DomainName', title: '來源網域', alias: ['domain', '網域'] },
+  { key: 'DomainAliases', title: '網域別名', alias: ['aliases', 'alias', '別名'] },
   { key: 'Backends', title: '後端主機', alias: ['backend', 'upstreams', '後端', '後端目標'] },
   { key: 'LbMethod', title: '分配方式', alias: ['lb', 'method'] },
   { key: 'LbCookieName', title: 'Cookie名稱', alias: ['cookie', 'cookie 名稱'] },
@@ -122,6 +124,7 @@ function rowsFromCsv(text) {
     const row = {
       line: n + 2,
       DomainName: get('DomainName').toLowerCase(),
+      DomainAliases: get('DomainAliases') ? parseAliases(get('DomainAliases')).join('\n') : null,
       Upstreams: parseBackends(get('Backends'), parseErrors),
       LbMethod: null,
       LbCookieName: get('LbCookieName') || null,
@@ -150,6 +153,7 @@ function cleanClientRow(r, i) {
   return {
     line: Number(r?.line) || i + 1,
     DomainName: String(r?.DomainName || '').trim().toLowerCase(),
+    DomainAliases: r?.DomainAliases ? parseAliases(String(r.DomainAliases).slice(0, 20000)).join('\n') || null : null,
     Upstreams: Array.isArray(r?.Upstreams) ? r.Upstreams.slice(0, 64).map((u) => ({
       Host: String(u?.Host || '').trim(), Port: Number(u?.Port), Weight: Number(u?.Weight || 1), IsBackup: b(u?.IsBackup) === true, IsActive: b(u?.IsActive) !== false,
     })) : [],
@@ -171,6 +175,10 @@ function cleanClientRow(r, i) {
 function analyze(rows, existing, certs) {
   const byDomain = new Map(existing.map((r) => [r.DomainName.toLowerCase(), r]));
   const firstLineOf = new Map(); // 檔案內網域第一次出現的列
+  // 網域唯一：既有規則的主網域 + 別名 → 所屬規則主網域；檔案內各列宣告的名稱 → { domain, line }
+  const existingOwner = new Map();
+  existing.forEach((r) => domainsOf(r).forEach((d) => { if (!existingOwner.has(d)) existingOwner.set(d, r.DomainName.toLowerCase()); }));
+  const fileOwner = new Map();
   return rows.map((row) => {
     const errors = [...(row.parseErrors || [])];
     const warnings = [];
@@ -211,6 +219,21 @@ function analyze(rows, existing, certs) {
       Remark: pickv('Remark', null),
     };
     merged.LbCookieName = merged.LbMethod === 'cookie' ? pickv('LbCookieName', null) : null;
+    merged.DomainAliases = pickv('DomainAliases', null);
+    const aliasList = parseAliases(merged.DomainAliases);
+    if (cert && domainOk) {
+      const notCovered = aliasList.filter((a) => !certCoversDomain(cert.SanDomains, a));
+      if (notCovered.length) errors.push(`憑證「${cert.Alias}」不涵蓋別名 ${notCovered.join('、')}`);
+    }
+    if (domainOk) {
+      domainsOf(merged).forEach((d) => {
+        const owner = existingOwner.get(d);
+        if (owner && owner !== domain) errors.push(d === owner ? `${d} 已是既有規則的來源網域` : `${d} 已是規則 ${owner} 的別名`);
+        const f = fileOwner.get(d);
+        if (f && f.domain !== domain) errors.push(`${d} 與檔案第 ${f.line} 列（${f.domain}）重複`);
+        else if (!f) fileOwner.set(d, { domain, line: row.line });
+      });
+    }
     if (domainOk) {
       validateRule({ ...merged, CertificateId: merged.CertificateId || -1 })
         .filter((e) => !e.startsWith('來源網域') && !(row.parseErrors || []).length)
@@ -244,6 +267,8 @@ function analyze(rows, existing, certs) {
     return {
       line: row.line,
       DomainName: domain,
+      DomainAliases: row.DomainAliases,
+      AliasesText: aliasList.join('; '),
       Upstreams: row.Upstreams,
       BackendsText: backendText(row.Upstreams),
       LbMethod: row.LbMethod, LbCookieName: row.LbCookieName, Certificate: row.Certificate,
@@ -268,7 +293,7 @@ const yn = (v) => (v ? '是' : '否');
 function toCsv(rules, certs) {
   const head = COLUMNS.map((c) => c.title);
   const lines = rules.map((r) => [
-    r.DomainName, backendText(r.Upstreams), LB_TEXT[r.LbMethod] || r.LbMethod, r.LbCookieName || '',
+    r.DomainName, parseAliases(r.DomainAliases).join('; '), backendText(r.Upstreams), LB_TEXT[r.LbMethod] || r.LbMethod, r.LbCookieName || '',
     (certs.find((c) => c.Id === r.CertificateId) || {}).Alias || r.CertificateId,
     yn(r.ForceHttps), yn(r.EnableWebSocket), r.ClientMaxBodySize, yn(r.IsActive), yn(r.IsMaintenance), r.Remark || '',
   ]);

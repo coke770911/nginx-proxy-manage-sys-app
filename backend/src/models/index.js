@@ -36,6 +36,8 @@ const SslCertificate = sequelize.define('SslCertificate', {
 const DomainRule = sequelize.define('DomainRule', {
   Id: pk(),
   DomainName: { type: DataTypes.STRING(253), allowNull: false },
+  DomainAliases: { type: DataTypes.TEXT }, // 網域別名，一行一個（v1.0.20 起）
+  Custom404: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false }, // 後端回 404 時改顯示系統頁面（v1.0.20 起）
   TargetIp: { type: DataTypes.STRING(255), allowNull: false },
   TargetPort: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 80 },
   CertificateId: { type: DataTypes.INTEGER, allowNull: false },

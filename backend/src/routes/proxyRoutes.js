@@ -6,7 +6,7 @@ const { Op } = require('sequelize');
 const { sequelize, ProxyNode, SslCertificate, DomainRule, RuleUpstream, DeployLog, AuditLog } = require('../models');
 const audit = require('../services/auditService');
 const certService = require('../services/certService');
-const { validateRule, renderConf, upstreamsOf } = require('../services/nginxTemplate');
+const { validateRule, renderConf, upstreamsOf, parseAliases, domainsOf } = require('../services/nginxTemplate');
 const deployService = require('../services/deployService');
 const healthService = require('../services/healthService');
 const { fetchHostFingerprint } = require('../services/sshSession');
@@ -180,8 +180,9 @@ router.put('/certificates/:id', certUpload, wrap(async (req, res) => {
   const cert = await SslCertificate.findByPk(req.params.id);
   if (!cert) throw new HttpError(404, '憑證不存在');
   const bundle = await certService.importFromUpload({ mode: req.body.mode, files: req.files, pfxPassword: req.body.pfxPassword });
-  const bound = await DomainRule.findAll({ where: { CertificateId: cert.Id }, attributes: ['DomainName'] });
-  const uncovered = bound.filter((r) => !certService.certCoversDomain(bundle.sanDomains, r.DomainName)).map((r) => r.DomainName);
+  const bound = await DomainRule.findAll({ where: { CertificateId: cert.Id }, attributes: ['DomainName', 'DomainAliases'] });
+  // 主網域與別名都要在新憑證的涵蓋範圍內
+  const uncovered = bound.flatMap((r) => domainsOf(r)).filter((d) => !certService.certCoversDomain(bundle.sanDomains, d));
   if (uncovered.length) throw new HttpError(400, `新憑證未涵蓋已綁定的網域：${uncovered.join(', ')}`);
   const alias = String(req.body.alias || '').trim();
   const before = certInfo(cert);
@@ -202,11 +203,11 @@ router.delete('/certificates/:id', wrap(async (req, res) => {
 
 /* =============================================================== 網域規則 DomainRules */
 const RULE_FIELDS = [
-  'DomainName', 'CertificateId', 'ForceHttps', 'EnableWebSocket',
+  'DomainName', 'DomainAliases', 'CertificateId', 'ForceHttps', 'EnableWebSocket', 'Custom404',
   'ClientMaxBodySize', 'IsActive', 'IsMaintenance', 'CustomNginxSnippet', 'Remark', 'LbMethod', 'LbCookieName',
   'WafMode', 'WafExcludeIds', 'IpAccessMode', 'IpAccessList',
 ];
-const RULE_BOOLS = ['ForceHttps', 'EnableWebSocket', 'IsActive', 'IsMaintenance'];
+const RULE_BOOLS = ['ForceHttps', 'EnableWebSocket', 'Custom404', 'IsActive', 'IsMaintenance'];
 const UP_ORDER = [[{ model: RuleUpstream, as: 'Upstreams' }, 'SortOrder', 'ASC'], [{ model: RuleUpstream, as: 'Upstreams' }, 'Id', 'ASC']];
 const withUpstreams = { model: RuleUpstream, as: 'Upstreams', attributes: ['Id', 'Host', 'Port', 'Weight', 'IsBackup', 'IsActive', 'SortOrder'] };
 
@@ -216,15 +217,36 @@ async function checkRule(plain) {
   await ipGroups.assertRefsExist(plain.IpAccessList, 'IP 清單');
   const cert = await SslCertificate.findByPk(plain.CertificateId, { attributes: NO_PEM });
   if (!cert) throw new HttpError(400, '所選憑證不存在');
-  if (!certService.certCoversDomain(cert.SanDomains, plain.DomainName)) {
-    throw new HttpError(400, `憑證「${cert.Alias}」的涵蓋網域（${cert.SanDomains}）不包含 ${plain.DomainName}`);
+  // 主網域與所有別名都必須在憑證涵蓋範圍內（*.x 只涵蓋一層）
+  const uncovered = domainsOf(plain).filter((d) => !certService.certCoversDomain(cert.SanDomains, d));
+  if (uncovered.length) {
+    throw new HttpError(400, `憑證「${cert.Alias}」的涵蓋網域（${cert.SanDomains}）不包含 ${uncovered.join('、')}`);
   }
+  await assertDomainsUnique(plain);
+}
+
+/**
+ * 全系統網域唯一：任何名稱在「所有規則的主網域 + 別名」中只能出現一次（不含自己）。
+ * 主網域另有資料庫唯一限制；別名存在文字欄位，由這裡檢查。
+ */
+async function assertDomainsUnique(plain, others) {
+  const mine = domainsOf(plain);
+  const rows = others || await DomainRule.findAll({ attributes: ['Id', 'DomainName', 'DomainAliases'] });
+  const owner = new Map();
+  rows.forEach((r) => {
+    if (plain.Id && Number(r.Id) === Number(plain.Id)) return;
+    domainsOf(r).forEach((d) => { if (!owner.has(d)) owner.set(d, r.DomainName); });
+  });
+  const dup = mine.filter((d) => owner.has(d)).map((d) => (owner.get(d) === d ? d : `${d}（規則 ${owner.get(d)} 的別名）`));
+  if (dup.length) throw new HttpError(409, `網域已被其他規則使用：${dup.join('、')}`);
 }
 
 function normalizeRule(data) {
   const out = { ...data };
   RULE_BOOLS.forEach((k) => { if (k in out) out[k] = toBool(out[k]); });
   if ('DomainName' in out) out.DomainName = String(out.DomainName).trim().toLowerCase();
+  // 別名整理成一行一個（小寫、去重複）；空白 = 沒有別名
+  if ('DomainAliases' in out) out.DomainAliases = parseAliases(out.DomainAliases).join('\n') || null;
   if ('ClientMaxBodySize' in out) out.ClientMaxBodySize = String(out.ClientMaxBodySize).trim();
   if ('LbMethod' in out) out.LbMethod = String(out.LbMethod || 'round_robin').trim();
   if ('LbCookieName' in out) out.LbCookieName = String(out.LbCookieName || '').trim() || null;

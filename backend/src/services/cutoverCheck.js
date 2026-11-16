@@ -17,7 +17,7 @@ const https = require('https');
 const tls = require('tls');
 const dns = require('dns').promises;
 const config = require('../config');
-const { upstreamsOf } = require('./nginxTemplate');
+const { upstreamsOf, domainsOf } = require('./nginxTemplate');
 
 const TIMEOUT_MS = 10000;
 const MAX_BODY = 2 * 1024 * 1024;
@@ -248,13 +248,18 @@ async function checkRules(rules, nodes) {
     } else if (!rule.IsActive) {
       jobs.push({ rule, skip: '規則未啟用，不會部署到節點' });
     } else {
-      jobs.push({ rule, domain: String(rule.DomainName).toLowerCase() });
+      // 主網域與每個別名各自檢查（DNS 指向、憑證、節點回應都可能不同）
+      domainsOf(rule).forEach((d) => {
+        if (d.startsWith('*.')) jobs.push({ rule, skip: `萬用別名 ${d} 無法直接檢查`, label: d });
+        else jobs.push({ rule, domain: d });
+      });
     }
   }
   const results = await mapLimit(jobs, DOMAIN_CONCURRENCY, async (j) => {
-    if (j.skip) return { ruleId: j.rule.Id, domain: j.rule.DomainName, verdict: 'skip', issues: [{ level: 'info', text: j.skip }] };
+    if (j.skip) return { ruleId: j.rule.Id, domain: j.label || j.rule.DomainName, verdict: 'skip', issues: [{ level: 'info', text: j.skip }] };
     try {
-      return { ruleId: j.rule.Id, ...(await checkDomain(j.rule, j.domain, nodes)) };
+      const aliasOf = j.domain !== String(j.rule.DomainName).toLowerCase() ? j.rule.DomainName : undefined;
+      return { ruleId: j.rule.Id, aliasOf, ...(await checkDomain(j.rule, j.domain, nodes)) };
     } catch (e) {
       return { ruleId: j.rule.Id, domain: j.domain, verdict: 'fail', issues: [{ level: 'fail', text: `檢查失敗：${e.message}` }] };
     }

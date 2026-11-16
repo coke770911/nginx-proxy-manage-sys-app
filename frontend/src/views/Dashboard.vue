@@ -72,7 +72,9 @@ const idleText = (d) => {
   return n === 0 ? '今天有更動' : `${n} 天沒變動`;
 };
 /** 規則網址：有綁憑證走 https，否則 http */
-const siteUrl = (r) => `${r.CertificateId ? 'https' : 'http'}://${r.DomainName}/`;
+const siteUrl = (r, d) => `${r.CertificateId ? 'https' : 'http'}://${d || r.DomainName}/`;
+// 網域別名：DB 存一行一個；表單允許換行 / 逗號 / 空白分隔
+const aliasList = (v) => [...new Set(String(v || '').split(/[\s,;，、]+/).map((x) => x.trim().toLowerCase()).filter(Boolean))];
 /** 舊部署紀錄每行開頭是 UTC ISO 時間，轉成當地時間顯示 */
 const localizeLog = (text) => String(text || '').replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/gm, (iso) => fmt(iso));
 const daysLeft = (d) => Math.floor((new Date(d).getTime() - Date.now()) / 86400000);
@@ -113,6 +115,7 @@ const filteredRules = computed(() => {
   const q = ruleQuery.value.trim().toLowerCase();
   if (!q) return rules.value;
   return rules.value.filter((r) => r.DomainName.toLowerCase().includes(q)
+    || aliasList(r.DomainAliases).some((a) => a.includes(q))
     || ruleUpstreams(r).some((u) => `${u.Host}:${u.Port}`.toLowerCase().includes(q)));
 });
 
@@ -149,8 +152,8 @@ async function loadAudit(resetPage = false) {
 }
 
 const FIELD_LABEL = {
-  DomainName: '來源網域', TargetIp: '後端 IP', TargetPort: '後端 Port', CertificateId: '憑證 ID', ForceHttps: '強制 HTTPS',
-  EnableWebSocket: 'WebSocket', ClientMaxBodySize: '上傳上限', IsActive: '啟用', IsMaintenance: '維護中頁面',
+  DomainName: '來源網域', DomainAliases: '網域別名', TargetIp: '後端 IP', TargetPort: '後端 Port', CertificateId: '憑證 ID', ForceHttps: '強制 HTTPS',
+  EnableWebSocket: 'WebSocket', Custom404: '後端 404 改顯示系統頁', ClientMaxBodySize: '上傳上限', IsActive: '啟用', IsMaintenance: '維護中頁面',
   CustomNginxSnippet: '自訂 Nginx 語法', Remark: '備註', NodeName: '節點名稱', IpAddress: 'IP', SshPort: 'SSH Port',
   SshUser: 'SSH 帳號', SshKeyPath: '私鑰路徑', HostKeySha256: '主機指紋', Alias: '別名', SanDomains: '涵蓋網域',
   Issuer: '發行商', Fingerprint: '憑證指紋', ValidTo: '到期日', Username: '帳號', DisplayName: '姓名 / 單位',
@@ -496,8 +499,8 @@ async function removeNode(row) {
 /* ------------------------------------------------------------------ 網域規則 CRUD */
 const blankUpstream = () => ({ Host: '', Port: 80, Weight: 1, IsBackup: false, IsActive: true });
 const blankRule = () => ({
-  DomainName: '', CertificateId: null,
-  ForceHttps: true, EnableWebSocket: false, ClientMaxBodySize: '2M',
+  DomainName: '', DomainAliases: '', CertificateId: null,
+  ForceHttps: true, EnableWebSocket: false, Custom404: false, ClientMaxBodySize: '2M',
   IsActive: true, IsMaintenance: false, CustomNginxSnippet: '', Remark: '',
   LbMethod: 'round_robin', LbCookieName: '', Upstreams: [blankUpstream()],
   WafMode: 'off', WafExcludeIds: '', IpAccessMode: 'off', IpAccessList: '',
@@ -522,6 +525,14 @@ const ruleDlg = reactive({ visible: false, id: null, saving: false, form: blankR
 const ruleFormRef = ref();
 const ruleRules = {
   DomainName: [{ required: true, message: '請輸入來源網域', trigger: 'blur' }],
+  DomainAliases: [{ validator: (_r, v, cb) => {
+    const list = aliasList(v);
+    const bad = list.filter((d) => !/^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(d));
+    if (bad.length) return cb(new Error(`格式不正確：${bad.slice(0, 3).join('、')}`));
+    if (list.length > 50) return cb(new Error('別名最多 50 個'));
+    if (list.includes(String(ruleDlg.form.DomainName || '').trim().toLowerCase())) return cb(new Error('別名不可與來源網域相同'));
+    return cb();
+  }, trigger: 'blur' }],
   Upstreams: [{ validator: validateUpstreams, trigger: 'submit' }],
   LbCookieName: [{ validator: (_r, v, cb) => (ruleDlg.form.LbMethod !== 'cookie' || /^[A-Za-z0-9_]{1,64}$/.test(v || '') ? cb() : cb(new Error('Cookie 名稱只能用英數字與底線'))), trigger: 'blur' }],
   CertificateId: [{ required: true, message: '請選擇 SSL 憑證', trigger: 'change' }],
@@ -532,7 +543,7 @@ const ruleRules = {
 function openRule(row) {
   ruleDlg.id = row ? row.Id : null;
   ruleDlg.form = row
-    ? { ...blankRule(), ...row, certificate: undefined, LbCookieName: row.LbCookieName || '', WafMode: row.WafMode || 'off', WafExcludeIds: row.WafExcludeIds || '', IpAccessMode: row.IpAccessMode || 'off', IpAccessList: row.IpAccessList || '', Upstreams: ruleUpstreams(row).map(({ Host, Port, Weight, IsBackup, IsActive }) => ({ Host, Port, Weight, IsBackup, IsActive })) }
+    ? { ...blankRule(), ...row, certificate: undefined, DomainAliases: row.DomainAliases || '', LbCookieName: row.LbCookieName || '', WafMode: row.WafMode || 'off', WafExcludeIds: row.WafExcludeIds || '', IpAccessMode: row.IpAccessMode || 'off', IpAccessList: row.IpAccessList || '', Upstreams: ruleUpstreams(row).map(({ Host, Port, Weight, IsBackup, IsActive }) => ({ Host, Port, Weight, IsBackup, IsActive })) }
     : blankRule();
   ruleDlg.visible = true;
 }
@@ -638,10 +649,10 @@ async function copyPassDomains() {
 
 /* ------------------------------------------------------------------ 規則匯入 / 匯出（CSV） */
 const IMPORT_TEMPLATE = [
-  '來源網域,後端主機,分配方式,Cookie名稱,SSL憑證,強制HTTPS,WebSocket,上傳上限,啟用,維護中,備註',
-  'portal.example.edu.tw,10.0.0.21:8080,,,,是,否,50M,是,否,單一後端',
-  'app.example.edu.tw,10.0.0.31:8080*3; 10.0.0.32:8080; 10.0.0.33:8080(備援),最少連線,,,是,否,100M,是,否,三台後端：權重 3:1，第三台為備援',
-  'erp.example.edu.tw,10.0.0.41:80; 10.0.0.42:80,依Cookie固定,JSESSIONID,,是,否,50M,是,否,登入狀態固定在同一台',
+  '來源網域,網域別名,後端主機,分配方式,Cookie名稱,SSL憑證,強制HTTPS,WebSocket,上傳上限,啟用,維護中,備註',
+  'portal.example.edu.tw,www.portal.example.edu.tw,10.0.0.21:8080,,,,是,否,50M,是,否,單一後端',
+  'app.example.edu.tw,,10.0.0.31:8080*3; 10.0.0.32:8080; 10.0.0.33:8080(備援),最少連線,,,是,否,100M,是,否,三台後端：權重 3:1，第三台為備援',
+  'erp.example.edu.tw,,10.0.0.41:80; 10.0.0.42:80,依Cookie固定,JSESSIONID,,是,否,50M,是,否,登入狀態固定在同一台',
 ].join('\r\n');
 const IMP_STATUS = {
   new: { type: 'success', text: '新增' },
@@ -1060,6 +1071,16 @@ onMounted(() => {
               <span v-if="row.DomainName.startsWith('*.')">{{ row.DomainName }}</span>
               <a v-else class="domain-link" :href="siteUrl(row)" target="_blank" rel="noopener noreferrer"
                  :title="`另開視窗：${siteUrl(row)}`">{{ row.DomainName }}</a>
+              <el-popover v-if="aliasList(row.DomainAliases).length" placement="bottom-start" :width="300" trigger="click">
+                <template #reference><el-tag size="small" type="info" class="alias-tag">+{{ aliasList(row.DomainAliases).length }} 個別名</el-tag></template>
+                <div class="alias-pop">
+                  <div class="hint">同一個網站的其他網域（共用此規則設定）</div>
+                  <div v-for="a in aliasList(row.DomainAliases)" :key="a">
+                    <span v-if="a.startsWith('*.')" class="mono">{{ a }}</span>
+                    <a v-else class="domain-link mono" :href="siteUrl(row, a)" target="_blank" rel="noopener noreferrer">{{ a }}</a>
+                  </div>
+                </div>
+              </el-popover>
             </template>
           </el-table-column>
           <el-table-column label="後端目標" min-width="200">
@@ -1439,6 +1460,7 @@ onMounted(() => {
             </div>
             <ul>
               <li><b>來源網域</b>、<b>後端主機</b> 必填；後端多台以 <code>;</code> 分隔：<code>10.0.0.21:8080</code>、權重 <code>10.0.0.22:8080*3</code>、備援 <code>10.0.0.23:8080(備援)</code>、停用 <code>(停用)</code></li>
+              <li><b>網域別名</b> 選填，多個以 <code>;</code> 分隔；憑證必須涵蓋所有別名，且不可與其他規則的網域重複</li>
               <li><b>分配方式</b>：輪流 / 最少連線 / 依Cookie固定（需填 <b>Cookie名稱</b>）；空白 = 輪流</li>
               <li><b>SSL憑證</b>：憑證別名；空白會自動選涵蓋該網域、到期日最晚的憑證</li>
               <li><b>強制HTTPS、WebSocket、啟用、維護中</b>：是 / 否；<b>上傳上限</b>：例 50M；<b>備註</b></li>
@@ -1468,6 +1490,7 @@ onMounted(() => {
               <template #default="{ row }"><el-tag size="small" :type="IMP_STATUS[row.status].type">{{ IMP_STATUS[row.status].text }}</el-tag></template>
             </el-table-column>
             <el-table-column prop="DomainName" label="來源網域" min-width="170" show-overflow-tooltip />
+            <el-table-column prop="AliasesText" label="網域別名" min-width="150" show-overflow-tooltip />
             <el-table-column label="後端主機" min-width="200">
               <template #default="{ row }">
                 <div class="imp-backends">{{ row.BackendsText || '—' }}</div>
@@ -1598,7 +1621,7 @@ onMounted(() => {
               </template>
             </el-table-column>
             <el-table-column label="網域" min-width="200">
-              <template #default="{ row }"><span class="mono">{{ row.domain }}</span></template>
+              <template #default="{ row }"><span class="mono">{{ row.domain }}</span><el-tag v-if="row.aliasOf" size="small" type="info" class="alias-tag" :title="`規則 ${row.aliasOf} 的別名`">別名</el-tag></template>
             </el-table-column>
             <el-table-column label="判定" width="100" align="center">
               <template #default="{ row }"><el-tag :type="CUT_VERDICT[row.verdict].type" effect="dark">{{ CUT_VERDICT[row.verdict].text }}</el-tag></template>
@@ -1661,6 +1684,11 @@ onMounted(() => {
     <el-dialog v-model="ruleDlg.visible" :title="ruleDlg.id ? '編輯網域規則' : '新增網域規則'" width="680px" top="5vh" class="rwd-dialog">
       <el-form ref="ruleFormRef" :model="ruleDlg.form" :rules="ruleRules" label-width="130px" label-position="right">
         <el-form-item label="來源網域" prop="DomainName"><el-input v-model="ruleDlg.form.DomainName" placeholder="portal.aeust.edu.tw" /></el-form-item>
+        <el-form-item label="網域別名" prop="DomainAliases">
+          <el-input v-model="ruleDlg.form.DomainAliases" type="textarea" :autosize="{ minRows: 1, maxRows: 6 }"
+                    placeholder="選填，一行一個，例如：www.portal.aeust.edu.tw" />
+          <div class="hint">同一個網站的其他網域，與來源網域共用後端與所有設定；SSL 憑證必須同時涵蓋這些網域，且不可與其他規則重複。</div>
+        </el-form-item>
         <el-form-item label="後端主機" prop="Upstreams" required>
           <div class="ups-edit">
             <div class="ups-head"><span>IP / 主機名稱</span><span>Port</span><span>權重</span><span>備援</span><span>啟用</span><span /></div>
@@ -1700,6 +1728,8 @@ onMounted(() => {
           <el-checkbox v-model="ruleDlg.form.EnableWebSocket">支援 WebSocket</el-checkbox>
           <el-checkbox v-model="ruleDlg.form.IsActive">啟用</el-checkbox>
           <el-checkbox v-model="ruleDlg.form.IsMaintenance">系統維護中頁面</el-checkbox>
+          <el-checkbox v-model="ruleDlg.form.Custom404">後端 404 改顯示系統頁面</el-checkbox>
+          <div v-if="ruleDlg.form.Custom404" class="hint">後端回 404 時改顯示系統的 404 頁（後端自己回的 502 / 504 也會改用系統頁）。後端若是 API 或有自己設計的 404 頁，請勿開啟。</div>
         </el-form-item>
         <el-form-item label="上傳檔案上限"><el-input v-model="ruleDlg.form.ClientMaxBodySize" placeholder="2M" style="width: 160px" /></el-form-item>
         <el-form-item label="WAF 防護">
@@ -1972,6 +2002,8 @@ onMounted(() => {
 .node-card.inactive { opacity: 0.6; }
 .domain-link { color: var(--el-color-primary); text-decoration: none; word-break: break-all; }
 .domain-link:hover { text-decoration: underline; }
+.alias-tag { margin-left: 6px; cursor: pointer; vertical-align: middle; }
+.alias-pop { display: flex; flex-direction: column; gap: 4px; word-break: break-all; }
 .date-cell { font-size: 12px; color: #606266; white-space: nowrap; }
 .waf-ok { color: #67c23a; }
 .waf-miss { color: #f56c6c; }

@@ -145,6 +145,19 @@ IF OBJECT_ID(N'CK_DomainRules_IpAccessMode', N'C') IS NULL
     ALTER TABLE dbo.DomainRules ADD CONSTRAINT CK_DomainRules_IpAccessMode CHECK (IpAccessMode IN (N'off', N'allow', N'deny'));
 GO
 
+/* ---- 網域別名（v1.0.20 起）
+        DomainAliases：同一條規則的其他網域，一行一個（例：CNAME 到同一台後端的多個名稱）
+        部署時寫成 server_name 主網域 別名1 別名2 …；全系統（主網域 + 別名）不可重複，由程式檢查 ---- */
+IF COL_LENGTH(N'dbo.DomainRules', N'DomainAliases') IS NULL
+    ALTER TABLE dbo.DomainRules ADD DomainAliases NVARCHAR(MAX) NULL;
+GO
+
+/* ---- 後端 404 改顯示系統頁面（v1.0.20 起）
+        Custom404 = 1 時該網域開啟 proxy_intercept_errors，後端回 404 改顯示系統的 404 頁；預設關閉 ---- */
+IF COL_LENGTH(N'dbo.DomainRules', N'Custom404') IS NULL
+    ALTER TABLE dbo.DomainRules ADD Custom404 BIT NOT NULL CONSTRAINT DF_DomainRules_Custom404 DEFAULT (0);
+GO
+
 /* ---------------------------------------------------------------------------
    3a-2. IpAccessSettings — 全域 IP 黑名單（只有 Id = 1 一筆）
          BlockList：一行一筆 IP / CIDR，「#」後為備註；所有網域一律拒絕，空白 = 不啟用

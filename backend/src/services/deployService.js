@@ -15,7 +15,8 @@ const EventEmitter = require('events');
 const config = require('../config');
 const { ProxyNode, DomainRule, RuleUpstream, SslCertificate, DeployLog } = require('../models');
 const { NodeSession } = require('./sshSession');
-const { validateRule, renderConf, renderDefaultConf, DEFAULT_CONF_NAME, confFileName, certRemotePaths, upstreamsOf } = require('./nginxTemplate');
+const { validateRule, renderConf, renderDefaultConf, DEFAULT_CONF_NAME, confFileName, certRemotePaths, upstreamsOf, aliasesOf, domainsOf } = require('./nginxTemplate');
+const { certCoversDomain } = require('./certService');
 const backendProbe = require('./backendProbe');
 const waf = require('./wafService');
 const wafSettings = require('./wafSettingsService');
@@ -106,10 +107,21 @@ async function buildFileSet(log) {
   }
   const ipBlock = blockList.length > 0;
   const aclDomains = [];
+  const nameOwner = new Map(); // server_name → 所屬規則（主網域 / 別名不可跨規則重複，否則 nginx 只會吃第一個）
+  const aliasNotes = [];
   for (const r of rules) {
     const p = r.get({ plain: true });
     const errs = validateRule(p);
     if (!p.certificate) errs.push('找不到綁定的憑證');
+    else {
+      const uncovered = domainsOf(p).filter((d) => !certCoversDomain(p.certificate.SanDomains, d));
+      if (uncovered.length) errs.push(`憑證「${p.certificate.Alias}」不涵蓋 ${uncovered.join('、')}`);
+    }
+    domainsOf(p).forEach((d) => {
+      const owner = nameOwner.get(d);
+      if (owner && owner !== p.DomainName) errs.push(`${d} 與規則 ${owner} 重複`);
+      else nameOwner.set(d, p.DomainName);
+    });
     if (errs.length) {
       problems.push(`${p.DomainName}：${errs.join('；')}`);
       continue;
@@ -123,6 +135,7 @@ async function buildFileSet(log) {
       problems.push(`${p.DomainName}：${e.message}`);
       continue;
     }
+    if (aliasesOf(p).length) aliasNotes.push(`${p.DomainName} + ${aliasesOf(p).join(' ')}`);
     if (waf.ruleWafActive(p, wafCfg)) wafDomains.push(`${p.DomainName}（${waf.WAF_MODE_LABEL[p.WafMode]}）`);
     if (acl) aclDomains.push(`${p.DomainName}（${ipAccess.MODE_LABEL[acl.mode]} ${acl.entries.length} 筆${acl.groups.length ? `，含 ${acl.groups.map((g) => `@${g}`).join(' ')}` : ''}）`);
     if (!p.IsMaintenance) {
@@ -136,6 +149,7 @@ async function buildFileSet(log) {
     if (!defaultCert || new Date(p.certificate.ValidTo) > new Date(defaultCert.ValidTo)) defaultCert = p.certificate;
   }
   if (problems.length) throw new DeployError('部分規則驗證失敗，已中止部署（未變更任何節點）', { detail: problems.join('\n') });
+  if (aliasNotes.length) log('info', `網域別名：${aliasNotes.join('；')}`);
   if (!confs.size) log('warn', '目前沒有任何啟用的規則，部署後遠端只保留預設站台（404 頁面）');
   // 預設站台的 443 借用一張已部署、到期日最晚的憑證（以 IP 連線本來就會出現憑證名稱不符的警告）
   if (defaultCert) log('info', `預設站台（404 頁面）使用憑證「${defaultCert.Alias}」`);

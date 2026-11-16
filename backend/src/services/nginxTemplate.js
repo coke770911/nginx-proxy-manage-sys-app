@@ -21,6 +21,23 @@ const SIZE_RE = /^\d{1,5}[kKmMgG]?$/;
 const COOKIE_RE = /^[A-Za-z0-9_]{1,64}$/; // 需能組成 nginx 變數 $cookie_<名稱>
 const LB_METHODS = ['round_robin', 'least_conn', 'cookie'];
 const MAX_UPSTREAMS = 32;
+const MAX_ALIASES = 50;
+
+/**
+ * 網域別名：DomainAliases 為一行一個（也接受空白、逗號、分號分隔）的網域文字。
+ * 回傳「去空白、轉小寫、去重複」後的陣列，不做格式驗證（由 validateRule 負責）。
+ */
+function parseAliases(text) {
+  const seen = new Set();
+  return String(text || '').split(/[\s,;]+/).map((s) => s.trim().toLowerCase()).filter((s) => {
+    if (!s || seen.has(s)) return false;
+    seen.add(s);
+    return true;
+  });
+}
+const aliasesOf = (r) => parseAliases(r.DomainAliases);
+/** 主網域 + 所有別名（小寫） */
+const domainsOf = (r) => [String(r.DomainName || '').toLowerCase(), ...aliasesOf(r)].filter(Boolean);
 
 /** 取得規則的後端清單；舊資料沒有清單時以 TargetIp:TargetPort 當唯一一台 */
 function upstreamsOf(r) {
@@ -39,6 +56,11 @@ const certRemotePaths = (certId) => ({
 function validateRule(r) {
   const errs = [];
   if (!r.DomainName || !DOMAIN_RE.test(r.DomainName)) errs.push('來源網域格式不正確（例：portal.aeust.edu.tw）');
+  const aliases = aliasesOf(r);
+  if (aliases.length > MAX_ALIASES) errs.push(`網域別名最多 ${MAX_ALIASES} 個`);
+  const badAliases = aliases.filter((a) => a.length > 253 || !DOMAIN_RE.test(a));
+  if (badAliases.length) errs.push(`網域別名格式不正確：${badAliases.slice(0, 5).join('、')}${badAliases.length > 5 ? ' 等' : ''}`);
+  if (r.DomainName && aliases.includes(String(r.DomainName).toLowerCase())) errs.push('網域別名不可與來源網域相同');
   const method = r.LbMethod || 'round_robin';
   if (!LB_METHODS.includes(method)) errs.push('分配方式只能是 輪流 / 最少連線 / 依 Cookie 固定');
   if (method === 'cookie' && !COOKIE_RE.test(String(r.LbCookieName || ''))) errs.push('Cookie 名稱只能用英數字與底線（例：JSESSIONID、PHPSESSID）');
@@ -246,6 +268,15 @@ const notFoundHtml = () => shibaPage({
   en: 'The page you requested was not found on this server.',
 });
 
+/** 404：後端回 404 且規則開啟「後端 404 改顯示系統頁面」 */
+const backendNotFoundHtml = (domain) => shibaPage({
+  code: '404', domain, title: '找不到這個網頁',
+  sub: '柴犬拿著放大鏡找遍了每個角落，還是沒找到…',
+  codeText: 'HTTP 404 · Page Not Found',
+  msg: '您要找的網頁不存在或已移除，請確認網址是否正確，或回到網站首頁。',
+  en: 'The page you requested could not be found.',
+});
+
 /** 502 / 504：Nginx 連不上後端（後端沒開、Port 沒在監聽、防火牆擋住或逾時） */
 const backendDownHtml = (domain, code) => shibaPage({
   code, domain, title: '暫時找不到服務',
@@ -341,7 +372,11 @@ function renderConf(rule, opts = {}) {
   if (errs.length) throw new Error(`規則 ${rule.DomainName || '?'} 驗證失敗：${errs.join('；')}`);
 
   const domain = rule.DomainName.toLowerCase();
+  // server_name 主網域 + 別名（皆已通過 DOMAIN_RE 白名單）；轉址與 Host 都用 $host，會維持使用者輸入的那個名稱
+  const serverNames = domainsOf(rule).join(' ');
+  const aliases = aliasesOf(rule);
   const ws = !!rule.EnableWebSocket;
+  const custom404 = !!rule.Custom404;
   const members = activeUpstreams(rule);
   const multi = members.length > 1;
   const upName = rule.Id ? `rule${Number(rule.Id)}_backend` : 'rule_preview_backend';
@@ -400,11 +435,21 @@ function renderConf(rule, opts = {}) {
     `    proxy_connect_timeout ${multi ? '5s' : '10s'};`,
     '    proxy_send_timeout 300s;',
     `    proxy_read_timeout ${ws ? '3600s' : '300s'};`,
-    // 只攔 Nginx 自己產生的 502 / 504（連不上後端或逾時）；後端自己回的錯誤頁不攔（未開 proxy_intercept_errors）
+    // 預設只攔 Nginx 自己產生的 502 / 504（連不上後端或逾時），後端自己回的錯誤頁不攔。
+    // Custom404 開啟時加上 proxy_intercept_errors：後端回 404 改顯示系統頁（後端自己回的 502 / 504 也會改用系統頁）。
+    ...(custom404 ? ['    proxy_intercept_errors on;', '    error_page 404 @backend_404;'] : []),
     '    error_page 502 @backend_502;',
     '    error_page 504 @backend_504;',
     '}',
     '',
+    ...(custom404 ? [
+      'location @backend_404 {',
+      '    default_type text/html;',
+      '    charset utf-8;',
+      '    add_header Cache-Control "no-store" always;',
+      ...returnHtml('404', backendNotFoundHtml(domain)).map((l) => `    ${l}`),
+      '}',
+    ] : []),
     ...['502', '504'].flatMap((code) => [
       `location @backend_${code} {`,
       '    default_type text/html;',
@@ -432,8 +477,10 @@ function renderConf(rule, opts = {}) {
   out.push('# =====================================================================');
   out.push('# Managed by Nginx HA Proxy Manager — 請勿手動修改，下次部署會被覆寫');
   out.push(`# Domain : ${domain}`);
+  if (aliases.length) out.push(`# Aliases: ${aliases.join(' ')}`);
   out.push(`# Rule   : #${rule.Id || '-'}  →  ${memberText}${rule.IsMaintenance ? '   [MAINTENANCE MODE]' : ''}`);
   out.push(`# LB     : ${method}${method === 'cookie' ? ` (cookie ${rule.LbCookieName})` : ''}`);
+  if (custom404) out.push('# 404    : 後端 404 改顯示系統頁面');
   if (wafOn) out.push(`# WAF    : ${waf.WAF_MODE_LABEL[rule.WafMode]}`);
   if (ipOn) out.push(`# IP ACL : ${[opts.ipBlock && '全域黑名單', ipAcl && `${ipAccess.MODE_LABEL[ipAcl.mode]} ${ipAcl.entries.length} 筆`].filter(Boolean).join(' + ')}`);
   out.push(`# Remark :${String(rule.Remark || '').replace(/[\r\n]+/g, ' ')}`);
@@ -461,7 +508,7 @@ function renderConf(rule, opts = {}) {
   out.push('server {');
   out.push('    listen 80;');
   ppHttpListen().forEach((l) => out.push(l));
-  out.push(`    server_name ${domain};`);
+  out.push(`    server_name ${serverNames};`);
   ppRealIp().forEach((l) => out.push(l));
   if (ipOn) { out.push(''); ipLines.forEach((l) => out.push(l)); }
   out.push('');
@@ -490,7 +537,7 @@ function renderConf(rule, opts = {}) {
     out.push('    http2 on;');
   }
   ppHttpsListen().forEach((l) => out.push(l));
-  out.push(`    server_name ${domain};`);
+  out.push(`    server_name ${serverNames};`);
   ppRealIp().forEach((l) => out.push(l));
   if (ipOn) { out.push(''); ipLines.forEach((l) => out.push(l)); }
   out.push('');
@@ -550,6 +597,12 @@ function renderDefaultConf(certId) {
     '# 預設站台：直接以 IP 或未設定的網域連線時回 404 頁面',
     '# =====================================================================',
     '',
+    '# 網域別名讓 server_name 數量變多、名稱變長，加大雜湊表避免 could not build server_names_hash。',
+    '# 位於 http 層（sites-managed/*.conf 由 nginx.conf 的 http { } 引入）；',
+    '# 若 nginx.conf 已另外設定同名指令，nginx -t 會失敗並自動回滾。',
+    'server_names_hash_bucket_size 128;',
+    'server_names_hash_max_size 2048;',
+    '',
     'server {',
     '    listen 80 default_server;',
     ...ppHttpListen(true),
@@ -588,4 +641,4 @@ function renderDefaultConf(certId) {
   return out.join('\n');
 }
 
-module.exports = { validateRule, renderConf, renderDefaultConf, DEFAULT_CONF_NAME, confFileName, certRemotePaths, upstreamsOf, LB_METHODS };
+module.exports = { validateRule, renderConf, renderDefaultConf, DEFAULT_CONF_NAME, confFileName, certRemotePaths, upstreamsOf, LB_METHODS, parseAliases, aliasesOf, domainsOf, MAX_ALIASES };
