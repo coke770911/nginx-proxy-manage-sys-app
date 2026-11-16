@@ -260,7 +260,7 @@ GO
 
 /* ---------------------------------------------------------------------------
    6. AdminAccounts — 可登入帳號（介面「帳號管理」維護）
-      可登入名單 = 此表 IsActive = 1 的帳號 ∪ .env ADMIN_ACCOUNTS；密碼一律由 SOAP 驗證，不存密碼
+      可登入名單 = 此表 IsActive = 1 的帳號 ∪ .env ADMIN_ACCOUNTS；密碼一律由學校認證 REST API 驗證，不存密碼
    --------------------------------------------------------------------------- */
 IF OBJECT_ID(N'dbo.AdminAccounts', N'U') IS NULL
 CREATE TABLE dbo.AdminAccounts (

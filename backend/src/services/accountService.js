@@ -2,7 +2,7 @@
 /**
  * 登入帳號管理
  * 可登入帳號 = .env ADMIN_ACCOUNTS（不可於介面修改） ∪ 資料表 AdminAccounts 中啟用的帳號
- * 兩者都只是「授權名單」，密碼一律交由 SOAP 驗證，系統本身不保存密碼。
+ * 兩者都只是「授權名單」，密碼一律交由 portal 認證 API 驗證，系統本身不保存密碼。
  */
 const config = require('../config');
 const { AdminAccount } = require('../models');

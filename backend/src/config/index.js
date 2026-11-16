@@ -3,20 +3,6 @@ require('dotenv').config();
 
 const bool = (v, d = false) => (v === undefined || v === '' ? d : /^(1|true|yes)$/i.test(v));
 
-const XML_NAME = /^[A-Za-z_][\w.-]*(:[A-Za-z_][\w.-]*)?$/;
-const xmlName = (v, d, key) => {
-  const s = (v || d).trim();
-  if (!XML_NAME.test(s)) throw new Error(`.env 設定 ${key} 不是合法的 XML 元素名稱：${s}`);
-  return s;
-};
-
-function regex(v, d) {
-  try { return new RegExp(v || d, 'i'); } catch (e) { throw new Error(`.env 設定 SOAP_SUCCESS_REGEX 不是合法的正規表示式：${e.message}`); }
-}
-
-// dotenv 不支援字面 \n，範本若寫成單行可用 \n 表示換行（純美觀，SOAP 不需要換行）
-const template = (process.env.SOAP_REQUEST_TEMPLATE || '').replace(/\\n/g, '\n').trim();
-
 module.exports = {
   port: parseInt(process.env.PORT || '3000', 10),
   // Express trust proxy：loopback（預設）/ false / 數字（信任幾層代理）/ IP 或網段清單
@@ -27,7 +13,7 @@ module.exports = {
     return v;
   })(),
   auth: {
-    // 特權帳號（逗號分隔，不分大小寫）：與「帳號管理」中啟用的帳號合併為可登入名單，且都需通過 SOAP 驗證
+    // 特權帳號（逗號分隔，不分大小寫）：與「帳號管理」中啟用的帳號合併為可登入名單，且都需通過 portal 認證 API 驗證
     adminAccounts: (process.env.ADMIN_ACCOUNTS || '')
       .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
     jwtSecret: process.env.JWT_SECRET || '',
@@ -35,18 +21,19 @@ module.exports = {
     maxFailures: parseInt(process.env.LOGIN_MAX_FAILURES || '5', 10),
     lockMinutes: parseInt(process.env.LOGIN_LOCK_MINUTES || '15', 10),
   },
-  soap: {
-    url: process.env.SOAP_URL || '',
-    version: process.env.SOAP_VERSION === '1.2' ? '1.2' : '1.1',
-    action: process.env.SOAP_ACTION || '',
-    namespace: process.env.SOAP_NAMESPACE || 'http://tempuri.org/',
-    method: xmlName(process.env.SOAP_METHOD, 'Authenticate', 'SOAP_METHOD'),
-    userField: xmlName(process.env.SOAP_USER_FIELD, 'username', 'SOAP_USER_FIELD'),
-    passField: xmlName(process.env.SOAP_PASS_FIELD, 'password', 'SOAP_PASS_FIELD'),
-    requestTemplate: template,
-    successRegex: regex(process.env.SOAP_SUCCESS_REGEX, '>\\s*true\\s*<'),
-    timeoutMs: parseInt(process.env.SOAP_TIMEOUT_MS || '10000', 10),
-    rejectUnauthorized: bool(process.env.SOAP_TLS_VERIFY, true),
+  // 校內 portal 認證 REST API（帳密驗證 + userDataConnect 查姓名 / 單位）
+  authApi: {
+    url: (() => {
+      const v = (process.env.AUTH_API_URL || '').trim();
+      if (v && !/^https?:\/\/[^\s]+$/i.test(v)) throw new Error(`.env 設定 AUTH_API_URL 必須為 http(s) 網址：${v}`);
+      return v;
+    })(),
+    key: (process.env.AUTH_API_KEY || '').trim(),
+    timeoutMs: (() => {
+      const n = parseInt(process.env.AUTH_API_TIMEOUT_MS || '10000', 10);
+      return Number.isInteger(n) && n >= 1000 && n <= 60000 ? n : 10000;
+    })(),
+    rejectUnauthorized: bool(process.env.AUTH_API_TLS_VERIFY, true),
   },
   nginx: {
     // 只接受 modern / legacy，其他值一律視為設定錯誤，避免默默產生錯誤語法

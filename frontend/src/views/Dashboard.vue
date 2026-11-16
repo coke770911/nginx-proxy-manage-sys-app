@@ -980,7 +980,11 @@ onMounted(() => {
         <el-button type="primary" size="large" :icon="Upload" :loading="deploying" @click="startDeploy">
           一鍵同步部署
         </el-button>
-        <span class="user">{{ session.username }}</span>
+        <span class="user" :title="session.departments.length ? `單位：${session.departments.join('、')}` : ''">
+          <template v-if="session.name">{{ session.name }}<span class="user-acc">（{{ session.username }}）</span></template>
+          <template v-else>{{ session.username }}</template>
+          <span v-if="session.departments.length" class="user-dept">{{ session.departments.join('、') }}</span>
+        </span>
         <el-button :icon="SwitchButton" circle title="登出" @click="logout" />
       </div>
     </header>
@@ -1344,7 +1348,7 @@ onMounted(() => {
       <el-tab-pane label="帳號管理" name="accounts">
         <div class="toolbar">
           <el-button type="primary" :icon="Plus" @click="openAccount(null)">新增帳號</el-button>
-          <span class="hint">可登入名單 = 下列啟用中的帳號（含 .env 的 ADMIN_ACCOUNTS）；登入時一律以 SOAP 驗證密碼，本系統不保存密碼。</span>
+          <span class="hint">可登入名單 = 下列啟用中的帳號（含 .env 的 ADMIN_ACCOUNTS）；登入時一律以學校 portal 認證 API 驗證密碼，本系統不保存密碼。</span>
         </div>
         <el-table v-loading="accountsLoading" :data="accounts" stripe border style="width: 100%" empty-text="尚無帳號">
           <el-table-column prop="Username" label="帳號" min-width="140" />
@@ -1641,7 +1645,7 @@ onMounted(() => {
     <el-dialog v-model="accDlg.visible" :title="accDlg.id ? '編輯帳號' : '新增帳號'" width="480px" class="rwd-dialog">
       <el-form ref="accFormRef" :model="accDlg.form" :rules="accRules" label-width="100px">
         <el-form-item label="帳號" prop="Username">
-          <el-input v-model="accDlg.form.Username" :disabled="!!accDlg.id" placeholder="與 SOAP 認證相同的帳號" />
+          <el-input v-model="accDlg.form.Username" :disabled="!!accDlg.id" placeholder="與學校認證相同的帳號" />
         </el-form-item>
         <el-form-item label="姓名 / 單位"><el-input v-model="accDlg.form.DisplayName" maxlength="100" /></el-form-item>
         <el-form-item label="啟用"><el-switch v-model="accDlg.form.IsActive" /></el-form-item>
@@ -1956,7 +1960,9 @@ onMounted(() => {
 .topbar h1 { margin: 0; font-size: 22px; color: #1f2d3d; }
 .sub { color: #7b8794; font-size: 13px; margin-top: 2px; }
 .actions { display: flex; align-items: center; gap: 12px; }
-.user { color: #666; font-size: 13px; }
+.user { color: #666; font-size: 13px; display: inline-flex; flex-direction: column; line-height: 1.3; max-width: 220px; }
+.user-acc { color: #999; }
+.user-dept { color: #999; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .form-hint { color: #909399; font-size: 12px; line-height: 1.5; margin-top: 4px; width: 100%; }
 .fp-row { display: flex; gap: 8px; width: 100%; }
 .light.sm { width: 10px; height: 10px; display: inline-block; vertical-align: middle; margin-right: 6px; }

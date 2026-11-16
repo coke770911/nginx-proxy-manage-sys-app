@@ -36,7 +36,8 @@ if (fs.existsSync(path.join(publicDir, 'index.html'))) {
     process.exit(1);
   }
   if (!config.auth.adminAccounts.length) console.warn('[auth] ADMIN_ACCOUNTS 未設定，只有「帳號管理」中啟用的帳號可以登入');
-  if (!config.soap.url) console.warn('[auth] SOAP_URL 未設定，登入驗證將無法使用');
+  if (!config.authApi.url) console.error('[auth] AUTH_API_URL 未設定，登入驗證將無法使用，請於 backend/.env 設定認證服務網址');
+  if (!config.authApi.key) console.error('[auth] AUTH_API_KEY 未設定，登入驗證將無法使用，請於 backend/.env 填入認證服務 API 金鑰後重啟');
   try {
     await sequelize.authenticate();
     console.log('[db] SQL Server 連線成功');

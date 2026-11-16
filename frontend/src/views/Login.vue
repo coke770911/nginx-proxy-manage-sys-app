@@ -17,7 +17,8 @@ async function submit() {
   loading.value = true;
   try {
     const res = await login(form.username.trim(), form.password);
-    ElMessage.success(`歡迎，${res.username}`);
+    const dept = (res.departments || []).join('、');
+    ElMessage.success(`歡迎，${res.name || res.username}${dept ? `（${dept}）` : ''}`);
   } catch (e) {
     error.value = e.message;
     form.password = '';
@@ -45,7 +46,7 @@ async function submit() {
         <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon class="err" />
         <el-button type="primary" size="large" class="btn" :loading="loading" native-type="submit">登入</el-button>
       </el-form>
-      <div class="hint">僅限系統特權帳號登入（經 SOAP 帳號驗證）</div>
+      <div class="hint">僅限系統授權帳號登入（以學校帳號密碼驗證）</div>
     </el-card>
   </div>
 </template>

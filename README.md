@@ -82,7 +82,7 @@
 │     ├─ routes/proxyRoutes.js  REST API + SSE 即時 Log + 操作紀錄查詢
 │     ├─ routes/accountRoutes.js 帳號管理 API
 │     └─ services/
-│        ├─ soapAuth.js         SOAP 帳號密碼驗證
+│        ├─ portalAuth.js       校內 portal 認證 REST API：帳密驗證、姓名 / 單位查詢（userDataConnect）
 │        ├─ accountService.js   可登入名單（資料庫帳號 + .env 特權帳號）
 │        ├─ auditService.js     系統操作紀錄寫入（不含密碼 / 私鑰）
 │        ├─ certService.js      憑證解析 / 公私鑰比對 / PFX 轉檔
@@ -112,7 +112,7 @@ sqlcmd -S <host> -U sa -i database/schema.sql   # 可重複執行；舊版升級
 
 # 2. 設定（Windows：copy backend\.env.example backend\.env）
 cp backend/.env.example backend/.env
-#    必填：DB_*、JWT_SECRET、ADMIN_ACCOUNTS、SOAP_*、SSH_KEY_PATH
+#    必填：DB_*、JWT_SECRET、ADMIN_ACCOUNTS、AUTH_API_URL、AUTH_API_KEY、SSH_KEY_PATH
 
 # 3. 安裝、編譯前端、啟動（皆在專案根目錄執行）
 npm run install:all                  # 安裝 backend 與 frontend 相依套件
@@ -154,15 +154,17 @@ pm2 save          # 記住程序清單，服務重啟後自動還原
 - **只能跑 1 個執行個體**（`ecosystem.config.js` 已設定 fork 模式，請勿改成 cluster）：部署鎖、登入失敗鎖定、SSE 即時 Log、節點資源數據都存在記憶體。
 - **服務帳號權限**：以服務執行時（pm2-installer 預設 Local Service），`openssl` 要在系統 PATH；`SSH_KEY_PATH` 私鑰檔與 `backend\.env` 要讓服務帳號讀得到，並以 NTFS 權限限制只有系統管理員與服務帳號可讀（例如私鑰放 `C:\ProgramData\nginx-ha-manager\keys\`）。
 - **HTTPS**：建議以 IIS + URL Rewrite + ARR 套上憑證後轉給 `localhost:9050`（`TRUST_PROXY` 維持 `loopback`）；部署即時 Log 使用 SSE，需在 IIS 關閉回應緩衝（`responseBufferLimit="0"`），否則 Log 會在部署結束才一次出現。不使用 IIS 時，需在 Windows 防火牆開放 `PORT` 輸入連線。
-- **對外連線**：需能連到 SQL Server（1433）、兩台 Nginx 節點（SSH 22）與 SOAP 認證服務。
+- **對外連線**：需能連到 SQL Server（1433）、兩台 Nginx 節點（SSH 22）與校內 portal 認證服務（HTTPS 443；本機對外 IP 須在認證服務的 IP 白名單內）。
 - 連續啟動失敗 10 次（例如 `.env` 設定錯誤、資料庫連不上）PM2 會停止重啟，請用 `pm2 logs` 查看原因。
 
-## 登入與權限（SOAP + JWT）
+## 登入與權限（portal 認證 REST API + JWT）
 
 登入條件需**同時**滿足：
 
 1. 帳號在**可登入名單**內：`backend/.env` 的 `ADMIN_ACCOUNTS`（特權帳號，逗號分隔、不分大小寫）**加上**「帳號管理」分頁中新增且啟用的帳號。
-2. 帳號密碼通過 `SOAP_URL` 指定的 SOAP 認證服務驗證（本系統不保存任何密碼）。
+2. 帳號密碼通過 `AUTH_API_URL` 指定的校內 portal 認證 REST API 驗證（本系統不保存任何密碼）：後端以 `POST` 送出 `{ Account, Password }`，Header 帶 `X-Auth-Key: <AUTH_API_KEY>`，回應 `Ok === true` 才算成功。
+
+登入成功後，後端再以同一端點呼叫 `userDataConnect`（`{ Action: "userDataConnect", Account }`）取得**姓名與單位**，回傳前端並顯示於右上角（滑鼠移上可看完整單位）；查無資料（`NOT_FOUND`）或查詢失敗不影響登入，改顯示認證回應的 `DisplayName` 或帳號。姓名與單位一併放入 JWT，`GET /api/auth/me` 會回傳 `{ username, name, departments }`。
 
 登入成功後後端簽發 JWT（HS256，`JWT_SECRET` 簽章，有效時間 `JWT_EXPIRES_IN`），前端存於 `sessionStorage`，之後所有 API 以 `Authorization: Bearer <token>` 驗證；SSE 即時 Log 因 EventSource 無法帶標頭，改以 `?token=` 傳遞。每次請求都會重新比對可登入名單：在「帳號管理」停用或刪除帳號後，該帳號下一次操作即失去權限；從 `ADMIN_ACCOUNTS` 移除則需重啟後端。部署紀錄的「操作者」會記錄登入帳號。
 
@@ -172,21 +174,32 @@ pm2 save          # 記住程序清單，服務重啟後自動還原
 | `JWT_SECRET` | 至少 32 字元，未設定則後端拒絕啟動；更換後所有人需重新登入 |
 | `JWT_EXPIRES_IN` | Token 有效時間，例：`30m`、`8h` |
 | `LOGIN_MAX_FAILURES` / `LOGIN_LOCK_MINUTES` | 同一 IP + 帳號連續失敗次數上限與鎖定分鐘數 |
-| `SOAP_URL` / `SOAP_VERSION` / `SOAP_ACTION` | SOAP 服務端點、版本（1.1 / 1.2）、SOAPAction |
-| `SOAP_NAMESPACE` / `SOAP_METHOD` / `SOAP_USER_FIELD` / `SOAP_PASS_FIELD` | 自動組出 `<METHOD xmlns="NAMESPACE"><USER_FIELD>…</USER_FIELD><PASS_FIELD>…</PASS_FIELD></METHOD>` |
-| `SOAP_REQUEST_TEMPLATE` | 選填：完整 Envelope 範本（單行），`{{username}}` / `{{password}}` 自動帶入並 XML 跳脫 |
-| `SOAP_SUCCESS_REGEX` | 回應內容符合此正規表示式才算成功，例：`<AuthenticateResult>\s*true\s*</AuthenticateResult>` |
-| `SOAP_TLS_VERIFY` | SOAP 服務使用自簽憑證時設 `false` |
+| `AUTH_API_URL` | 認證服務 REST / JSON 端點（帳密驗證與 `userDataConnect` 共用），須為 http(s) 網址 |
+| `AUTH_API_KEY` | 認證服務 API 金鑰（以 `X-Auth-Key` 標頭送出），向認證服務管理者索取；**只放在 `backend/.env`**，不寫入程式、文件或前端，也不會寫入 Log |
+| `AUTH_API_TIMEOUT_MS` | 呼叫逾時毫秒數，1000–60000，預設 10000 |
+| `AUTH_API_TLS_VERIFY` | 認證服務使用自簽憑證時設 `false`（預設 `true`） |
 | `TRUST_PROXY` | 前方有反向代理時調整（預設 `loopback`），避免偽造 X-Forwarded-For 繞過登入鎖定 |
 
-- 不在白名單的帳號不會送往 SOAP 服務，但回應訊息與密碼錯誤相同，避免帳號被列舉。
-- SOAP 回應為 SOAP Fault 或 HTTP 狀態非 200 一律視為驗證失敗；服務無法連線時回 502。
+- 不在白名單的帳號不會送往認證服務，但回應訊息與密碼錯誤相同，避免帳號被列舉。
+- `AUTH_API_URL` 或 `AUTH_API_KEY` 未設定時後端仍可啟動，但啟動 Log 會以 `[auth]` 錯誤提示，登入時回 503「尚未設定認證服務 API 金鑰…」。
+- 認證服務錯誤碼會轉為中文訊息顯示在登入畫面（並寫入操作紀錄的失敗原因）：
+
+  | 認證服務 Code | 登入畫面訊息（摘要） | 本系統回應 |
+  |---|---|---|
+  | `INVALID_CREDENTIALS` | 帳號或密碼錯誤（與不在名單相同訊息，並計入登入失敗鎖定） | 401 |
+  | `API_KEY_INVALID` | API 金鑰錯誤或未提供，請檢查 `AUTH_API_KEY` | 502 |
+  | `IP_DENIED` / `PATH_MISMATCH` / `METHOD_NOT_ALLOWED` | 本機 IP 不在白名單 / 網址路徑不符 / 方法不允許 | 502 |
+  | `RATE_LIMITED` | 請求過於頻繁，請稍後再試 | 429 |
+  | `VENDOR_DISABLED` / `INTERNAL_ERROR` / `INVALID_REQUEST` | 服務已停用 / 服務內部錯誤 / 請求格式錯誤 | 502 |
+  | 逾時、連線失敗、非 JSON 回應 | 認證服務逾時 / 無法連線 / 回應異常 | 502 |
+
+- 舊版 SOAP 認證（`soapAuth.js` 與 `SOAP_*` 設定）已移除，升級時請自 `backend/.env` 刪除 `SOAP_*` 參數並補上 `AUTH_API_*`。
 
 ## 帳號管理
 
 「帳號管理」分頁維護可登入名單（資料表 `AdminAccounts`）：
 
-- **新增帳號**後該帳號才能登入；帳號需與 SOAP 認證使用的帳號相同，可填姓名 / 單位與備註。
+- **新增帳號**後該帳號才能登入；帳號需與學校認證服務使用的帳號相同，可填姓名 / 單位與備註。
 - 可**停用**或**刪除**帳號，立即生效（不需重啟）；不能停用或刪除自己目前登入的帳號。
 - `.env` 的 `ADMIN_ACCOUNTS` 帳號一併列出並標示「.env 特權」，介面上唯讀，只能改 `.env` 後重啟。
 - 顯示每個帳號的最後登入時間與建立者；新增、修改、刪除都會寫入操作紀錄。
@@ -639,7 +652,7 @@ sudo logrotate -d /etc/logrotate.d/nginx 2>&1 | grep -iE "error|rotating pattern
 - **私鑰存放**：`KeyPem` 以明文存於 SQL Server，請限制 DB 存取，並建議啟用 TDE / 欄位加密；備份檔 `/tmp/nginx_backup.tar.gz` 含私鑰，權限為 600。
 - **真實客戶端 IP**：F5 為 L4 Passthrough，有 SNAT 時 Nginx 看到的 `$remote_addr` 為 F5 位址；設定 `PROXY_PROTOCOL_FROM` 即可改用 PROXY protocol 還原，詳見上方「真實客戶端 IP（PROXY protocol）」。
 - **`/f5-health-check`** 設於每個網域與預設站台的 80/443 server；F5 以 IP 探測時會落到預設站台，仍會回 200。
-- **認證**：SOAP 帳密驗證 + 可登入名單（帳號管理 + `ADMIN_ACCOUNTS`）+ JWT，詳見上方「登入與權限」；正式環境請以 HTTPS 提供本系統，避免帳密與 Token 以明文傳輸。
+- **認證**：portal 認證 REST API 帳密驗證 + 可登入名單（帳號管理 + `ADMIN_ACCOUNTS`）+ JWT，詳見上方「登入與權限」；正式環境請以 HTTPS 提供本系統，避免帳密與 Token 以明文傳輸。
 - 版本相容：HTTP/2 寫法由 `.env` 的 `NGINX_HTTP2_SYNTAX` 決定。`modern`（預設）產生 `listen 443 ssl;` + `http2 on;`，適用 nginx ≥ 1.25.1（Ubuntu 26.04）；`legacy` 產生 `listen 443 ssl http2;`，適用 nginx 1.24（Ubuntu 24.04），在新版 nginx 上會出現過時警告。兩台節點請使用相同 Ubuntu 版本。
 - 自訂 Nginx 語法插入 443 server 區塊（位於 `location /` 之前），僅檢查大括號成對，語法正確性由 `nginx -t` 把關。
 - 介面上的時間一律以當地時間 `YYYY/MM/DD HH:mm:ss` 顯示；部署紀錄 Log 以伺服器當地時間寫入，舊紀錄中的 UTC 時間會在顯示時自動轉換。

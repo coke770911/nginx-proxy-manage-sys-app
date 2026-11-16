@@ -7,14 +7,25 @@ const USER_KEY = 'username';
 const read = (k) => { try { return sessionStorage.getItem(k) || ''; } catch { return ''; } };
 const write = (k, v) => { try { if (v) sessionStorage.setItem(k, v); else sessionStorage.removeItem(k); } catch { /* ignore */ } };
 
-/** 登入狀態（JWT 存於 sessionStorage，關閉分頁即需重新登入） */
-export const session = reactive({ token: read(TOKEN_KEY), username: read(USER_KEY) });
+const PROFILE_KEY = 'profile';
+const readProfile = () => {
+  try {
+    const p = JSON.parse(read(PROFILE_KEY) || '{}');
+    return { name: String(p.name || ''), departments: Array.isArray(p.departments) ? p.departments.map(String) : [] };
+  } catch { return { name: '', departments: [] }; }
+};
 
-export function setSession(token, username) {
+/** 登入狀態（JWT 存於 sessionStorage，關閉分頁即需重新登入）；name / departments 來自認證服務 userDataConnect */
+export const session = reactive({ token: read(TOKEN_KEY), username: read(USER_KEY), ...readProfile() });
+
+export function setSession(token, username, profile = {}) {
   session.token = token || '';
   session.username = username || '';
+  session.name = String(profile.name || '');
+  session.departments = Array.isArray(profile.departments) ? profile.departments.map(String) : [];
   write(TOKEN_KEY, session.token);
   write(USER_KEY, session.username);
+  write(PROFILE_KEY, session.token ? JSON.stringify({ name: session.name, departments: session.departments }) : '');
 }
 
 export const logout = () => setSession('', '');
@@ -43,7 +54,7 @@ api.interceptors.response.use(
 
 export async function login(username, password) {
   const res = await api.post('/auth/login', { username, password });
-  setSession(res.token, res.username);
+  setSession(res.token, res.username, { name: res.name, departments: res.departments });
   return res;
 }
 

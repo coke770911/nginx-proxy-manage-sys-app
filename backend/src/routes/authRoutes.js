@@ -1,13 +1,14 @@
 'use strict';
 /**
  * 登入與 JWT 驗證
- * 登入條件：帳號在 .env ADMIN_ACCOUNTS 白名單內「且」通過 SOAP 帳密驗證。
+ * 登入條件：帳號在可登入名單內（ADMIN_ACCOUNTS + 帳號管理）「且」通過 portal 認證 REST API 帳密驗證。
+ * 登入成功後以 userDataConnect 取得姓名與單位放入 JWT（查無資料不影響登入）。
  * 每次 API 請求都會重新檢查白名單，帳號自 .env 移除並重啟後，舊 Token 立即失效。
  */
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
-const soapAuth = require('../services/soapAuth');
+const portalAuth = require('../services/portalAuth');
 const audit = require('../services/auditService');
 const accounts = require('../services/accountService');
 
@@ -57,16 +58,18 @@ router.post('/login', async (req, res) => {
     return res.status(429).json({ message: `登入失敗次數過多，請 ${mins} 分鐘後再試` });
   }
 
-  // 不在白名單者不送 SOAP，但回應訊息與帳密錯誤相同，避免帳號列舉
+  // 不在白名單者不送認證服務，但回應訊息與帳密錯誤相同，避免帳號列舉
   let ok = false;
+  let displayName = '';
   const source = await accounts.loginSource(username);
   if (source) {
     try {
-      ok = await soapAuth.verify(username, password);
+      ({ ok, displayName } = await portalAuth.verify(username, password));
     } catch (e) {
-      console.error('[auth] SOAP 認證服務錯誤：', e.message);
-      await audit.record(req, { action: 'LOGIN_FAILED', targetType: 'AUTH', username, success: false, detail: { reason: '認證服務錯誤' } });
-      return res.status(502).json({ message: `認證服務無法使用：${e.message}` });
+      console.error(`[auth] 認證服務錯誤（${e.code || 'ERROR'}）：${e.message}`);
+      await audit.record(req, { action: 'LOGIN_FAILED', targetType: 'AUTH', username, success: false, detail: { reason: '認證服務錯誤', code: e.code } });
+      const status = e.code === 'NOT_CONFIGURED' ? 503 : e.code === 'RATE_LIMITED' ? 429 : 502;
+      return res.status(status).json({ message: `認證服務無法使用：${e.message}` });
     }
   }
 
@@ -78,13 +81,17 @@ router.post('/login', async (req, res) => {
   }
 
   failures.delete(key);
-  const token = jwt.sign({ sub: username }, config.auth.jwtSecret, {
+  // 姓名與單位：查無資料或查詢失敗不影響登入，退回使用 DisplayName
+  const profile = await portalAuth.getUserData(username);
+  const name = (profile?.name || displayName || '').slice(0, 100);
+  const departments = (profile?.departments || []).slice(0, 10).map((d) => d.slice(0, 100));
+  const token = jwt.sign({ sub: username, name, dept: departments }, config.auth.jwtSecret, {
     expiresIn: config.auth.jwtExpiresIn, issuer: ISSUER, algorithm: 'HS256',
   });
   console.log(`[auth] 登入成功：${username} @ ${req.ip}`);
   if (source === 'db') await accounts.touchLogin(username);
-  await audit.record(req, { action: 'LOGIN', targetType: 'AUTH', username, detail: { source: source === 'env' ? '.env 特權帳號' : '帳號管理' } });
-  return res.json({ token, username, expiresIn: config.auth.jwtExpiresIn });
+  await audit.record(req, { action: 'LOGIN', targetType: 'AUTH', username, detail: { source: source === 'env' ? '.env 特權帳號' : '帳號管理', name: name || undefined } });
+  return res.json({ token, username, name, departments, expiresIn: config.auth.jwtExpiresIn });
 });
 
 /** JWT 驗證中介層：Authorization: Bearer <token>；SSE（EventSource 無法帶標頭）可用 ?token= */
@@ -103,10 +110,14 @@ async function requireAuth(req, res, next) {
   } catch (e) {
     return res.status(503).json({ message: `無法確認帳號權限：${e.message}` });
   }
-  req.user = { username: payload.sub };
+  req.user = {
+    username: payload.sub,
+    name: typeof payload.name === 'string' ? payload.name : '',
+    departments: Array.isArray(payload.dept) ? payload.dept : [],
+  };
   return next();
 }
 
-router.get('/me', requireAuth, (req, res) => res.json({ username: req.user.username }));
+router.get('/me', requireAuth, (req, res) => res.json(req.user));
 
 module.exports = { router, requireAuth };
