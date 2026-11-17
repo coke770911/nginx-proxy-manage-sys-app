@@ -119,4 +119,4 @@ async function getUserData(account) {
   return null;
 }
 
-module.exports = { verify, getUserData, AuthServiceError, CODE_MESSAGES };
+module.exports = { verify, getUserData, assertConfigured, AuthServiceError, CODE_MESSAGES };

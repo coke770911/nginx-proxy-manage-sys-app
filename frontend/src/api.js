@@ -52,8 +52,8 @@ api.interceptors.response.use(
   },
 );
 
-export async function login(username, password) {
-  const res = await api.post('/auth/login', { username, password });
+export async function login(username, password, captchaId, captcha) {
+  const res = await api.post('/auth/login', { username, password, captchaId, captcha });
   setSession(res.token, res.username, { name: res.name, departments: res.departments });
   return res;
 }

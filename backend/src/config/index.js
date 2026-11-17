@@ -20,6 +20,13 @@ module.exports = {
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || '8h',
     maxFailures: parseInt(process.env.LOGIN_MAX_FAILURES || '5', 10),
     lockMinutes: parseInt(process.env.LOGIN_LOCK_MINUTES || '15', 10),
+    // 登入圖片驗證碼（四碼數字），預設開啟
+    captcha: bool(process.env.LOGIN_CAPTCHA, true),
+    // 登入失敗回應的最短時間（毫秒），避免以回應時間差判斷帳號是否存在
+    failMinMs: (() => {
+      const n = parseInt(process.env.LOGIN_FAIL_MIN_MS || '1500', 10);
+      return Number.isInteger(n) && n >= 0 && n <= 10000 ? n : 1500;
+    })(),
   },
   // 校內 portal 認證 REST API（帳密驗證 + userDataConnect 查姓名 / 單位）
   authApi: {
