@@ -135,7 +135,7 @@ const AUDIT_ACTION = {
   RENEW: { type: 'warning', text: '憑證續約' },
   DEPLOY: { type: 'info', text: '部署' },
   CUTOVER_CHECK: { type: 'info', text: '切換前檢查' },
-  REBOOT: { type: 'danger', text: '節點重開機' },
+  REBOOT: { type: 'danger', text: '節點重新啟動' },
   UPGRADE: { type: 'warning', text: '節點更新套件' },
 };
 const AUDIT_TARGET = { AUTH: '登入', RULE: '網域規則', CERT: 'SSL 憑證', NODE: 'Nginx 節點', DEPLOY: '部署', ACCOUNT: '帳號管理', WAF: 'WAF 設定', IP: 'IP 存取控制' };
@@ -440,7 +440,7 @@ async function checkNodes() {
   } catch (e) { ElMessage.error(e.message); } finally { checking.value = false; }
 }
 
-/* ------------------------------------------------------------------ 節點套件更新資訊與遠端重開機 */
+/* ------------------------------------------------------------------ 節點套件更新資訊與遠端重新啟動 */
 const nodeUpd = (n) => (n.IsActive && n.Updates && !n.Updates.error ? n.Updates : null);
 function uptimeText(sec) {
   if (sec == null) return null;
@@ -452,15 +452,15 @@ const rebooting = reactive({});
 async function rebootNode(n) {
   const others = nodes.value.filter((x) => x.IsActive && x.Id !== n.Id);
   const warn = others.length
-    ? `重開機期間（約 1–3 分鐘）流量會由 F5 轉給 ${others.map((x) => x.NodeName).join('、')}。`
-    : '<b style="color:#f56c6c">這是唯一啟用中的節點，重開機期間所有網站都會中斷！</b>';
-  const pkgs = nodeUpd(n)?.rebootRequired ? '' : '<br>目前節點沒有「需要重開機」的更新。';
+    ? `重新啟動期間（約 1–3 分鐘）流量會由 F5 轉給 ${others.map((x) => x.NodeName).join('、')}。`
+    : '<b style="color:#f56c6c">這是唯一啟用中的節點，重新啟動期間所有網站都會中斷！</b>';
+  const pkgs = nodeUpd(n)?.rebootRequired ? '' : '<br>目前節點沒有「需要重新啟動」的更新。';
   try {
     await ElMessageBox.prompt(
-      `確定要重開機節點「${escHtml(n.NodeName)}」（${escHtml(n.IpAddress)}）？<br>${warn}${pkgs}<br><br>請輸入節點名稱確認：`,
-      '節點重開機',
+      `確定要重新啟動節點「${escHtml(n.NodeName)}」（${escHtml(n.IpAddress)}）？<br>${warn}${pkgs}<br><br>請輸入節點名稱確認：`,
+      '節點重新啟動',
       {
-        type: 'warning', dangerouslyUseHTMLString: true, confirmButtonText: '重開機', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger',
+        type: 'warning', dangerouslyUseHTMLString: true, confirmButtonText: '重新啟動', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger',
         inputPlaceholder: n.NodeName,
         inputValidator: (v) => (String(v || '').trim() === n.NodeName ? true : '請輸入完全相同的節點名稱'),
       },
@@ -469,7 +469,7 @@ async function rebootNode(n) {
   rebooting[n.Id] = true;
   try {
     await api.post(`/nodes/${n.Id}/reboot`, { confirmName: n.NodeName });
-    ElMessage.success(`已送出重開機指令，${n.NodeName} 約 1–3 分鐘後恢復，可按「重新檢測」確認`);
+    ElMessage.success(`已送出重新啟動指令，${n.NodeName} 約 1–3 分鐘後恢復，可按「重新檢測」確認`);
     nodes.value = await api.get('/nodes');
   } catch (e) {
     ElMessage.error({ message: e.message, duration: 8000 });
@@ -490,7 +490,7 @@ async function pollUpgrade() {
     await nextTick();
     if (upgLogRef.value) upgLogRef.value.scrollTop = upgLogRef.value.scrollHeight;
     if (upgDlg.st.justFinished || (!upgDlg.st.running && upgDlg.st.result)) {
-      if (upgDlg.st.justFinished) checkNodes(); // 重新取得可更新套件數與「需要重開機」
+      if (upgDlg.st.justFinished) checkNodes(); // 重新取得可更新套件數與「需要重新啟動」
       return;
     }
   } catch (e) { upgDlg.error = e.message; }
@@ -1268,8 +1268,8 @@ onMounted(() => {
                   </div>
                 </div>
               </el-popover>
-              <el-tooltip v-if="nodeUpd(n).rebootRequired" :content="`需要重開機才會生效：${nodeUpd(n).rebootPkgs.join('、') || '（未列出套件）'}`" placement="top">
-                <el-tag size="small" type="danger" effect="dark">需要重開機</el-tag>
+              <el-tooltip v-if="nodeUpd(n).rebootRequired" :content="`需要重新啟動才會生效：${nodeUpd(n).rebootPkgs.join('、') || '（未列出套件）'}`" placement="top">
+                <el-tag size="small" type="danger" effect="dark">需要重新啟動</el-tag>
               </el-tooltip>
               <el-tag v-if="nodeUpd(n).newRelease" size="small" type="info" :title="'有新版 Ubuntu 可升級（do-release-upgrade），屬重大升級，請先在測試機驗證'">新版 Ubuntu {{ nodeUpd(n).newRelease }}</el-tag>
             </div>
@@ -1282,8 +1282,8 @@ onMounted(() => {
                      :title="nodeUpd(n)?.packages?.length ? `安裝 ${nodeUpd(n).count} 個可更新套件（apt full-upgrade）` : '更新套件 / 查看上次更新紀錄'"
                      :class="{ 'upg-hot': nodeUpd(n)?.security }" @click="openUpgrade(n)">更新套件</el-button>
           <el-button size="small" :icon="RefreshRight" text :loading="rebooting[n.Id]" :disabled="!n.IsActive"
-                     :title="nodeUpd(n)?.rebootRequired ? '有更新需要重開機才生效' : '遠端重開機此節點'" :class="{ 'reboot-hot': nodeUpd(n)?.rebootRequired }"
-                     @click="rebootNode(n)">重開機</el-button>
+                     :title="nodeUpd(n)?.rebootRequired ? '有更新需要重新啟動才生效' : '遠端重新啟動此節點'" :class="{ 'reboot-hot': nodeUpd(n)?.rebootRequired }"
+                     @click="rebootNode(n)">重新啟動</el-button>
           <el-button size="small" :icon="Document" text title="檢視 Nginx Log" @click="openNodeLog(n)">Log</el-button>
           <el-button size="small" :icon="Edit" text title="編輯節點" @click="openNode(n)">編輯</el-button>
         </div>
@@ -2092,8 +2092,8 @@ onMounted(() => {
       </div>
       <el-alert v-if="upgDlg.error" type="error" :closable="false" show-icon :title="upgDlg.error" class="upg-alert" />
       <el-alert v-if="upgDlg.st && !upgDlg.st.running && upgDlg.st.rebootPkgs" type="warning" :closable="false" show-icon class="upg-alert"
-                :title="`更新完成，需要重開機才會生效：${upgDlg.st.rebootPkgs.join('、') || '（未列出套件）'}`">
-        <el-button size="small" type="danger" :icon="RefreshRight" @click="rebootNode(upgDlg.node)">重開機此節點</el-button>
+                :title="`更新完成，需要重新啟動才會生效：${upgDlg.st.rebootPkgs.join('、') || '（未列出套件）'}`">
+        <el-button size="small" type="danger" :icon="RefreshRight" @click="rebootNode(upgDlg.node)">重新啟動此節點</el-button>
       </el-alert>
       <el-alert v-if="upgDlg.st?.result === 'FAIL'" type="error" :closable="false" show-icon class="upg-alert"
                 title="更新失敗，請看下方 Log 的錯誤訊息；nginx -t 失敗時請先以 sysadmin 登入節點排除，再部署。" />
@@ -2380,7 +2380,7 @@ onMounted(() => {
 .node-tools { display: flex; align-items: center; gap: 12px; flex: none; }
 .node-tools .el-button + .el-button { margin-left: 0; }
 .node-row { display: flex; align-items: center; gap: 12px; }
-.node-actions { display: flex; justify-content: flex-end; gap: 4px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--el-border-color-lighter); }
+.node-actions { display: flex; justify-content: space-between; gap: 4px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--el-border-color-lighter); }
 .node-actions .el-button + .el-button { margin-left: 0; }
 .deploy-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
 .deploy-bar .hint { color: #999; font-size: 12px; }
