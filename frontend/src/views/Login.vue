@@ -45,6 +45,7 @@ onBeforeUnmount(() => clearTimeout(expireTimer));
 const onlyDigits = (v) => { form.captcha = String(v || '').replace(/\D/g, '').slice(0, 4); };
 
 async function submit() {
+  if (loading.value) return; // 防止重複送出（驗證碼一次性，第二次會被判定失效）
   error.value = '';
   if (!form.username.trim() || !form.password) {
     error.value = '請輸入帳號與密碼';
@@ -85,14 +86,14 @@ async function submit() {
         <el-form-item>
           <el-input
             v-model="form.password" :prefix-icon="Lock" type="password" placeholder="密碼" size="large"
-            show-password autocomplete="current-password" @keyup.enter="submit"
+            show-password autocomplete="current-password"
           />
         </el-form-item>
         <el-form-item v-if="captchaOn">
           <div class="captcha-row">
             <el-input
               ref="captchaRef" :model-value="form.captcha" :prefix-icon="Key" placeholder="驗證碼（四碼數字）" size="large"
-              inputmode="numeric" maxlength="4" autocomplete="off" @update:model-value="onlyDigits" @keyup.enter="submit"
+              inputmode="numeric" maxlength="4" autocomplete="off" @update:model-value="onlyDigits"
             />
             <button type="button" class="captcha-img" title="看不清楚？點圖片換一張" :disabled="cap.loading" @click="loadCaptcha">
               <img v-if="cap.image" :src="cap.image" alt="驗證碼圖片" width="120" height="44">
