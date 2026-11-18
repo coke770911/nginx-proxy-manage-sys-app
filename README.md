@@ -1,6 +1,6 @@
 # Nginx HA Proxy Manager
 
-目前版本：**v1.1.3**
+目前版本：**v1.1.4**
 
 反向代理伺服器節點管理系統（控制層）。管理員於網頁維護「網域 → 後端」規則與憑證，按下「一鍵同步部署」後，後端以 SSH/SFTP 平行推送到兩台 Ubuntu（26.04 / 24.04）Nginx，**兩台 `nginx -t` 都通過才 reload，任一失敗自動回滾**。
 
@@ -777,6 +777,10 @@ npm run version:test             # 驗證版號進位規則
 第一次推送到 GitHub：先在 GitHub 建立空的 repository，再執行 `git remote add origin <網址>` 與 `npm run release`。
 
 ## 更新紀錄
+
+### v1.1.4（2026-11-18）
+
+- 調整：節點更新偵測區分 Ubuntu 分批推送（phased updates）套件，不計入可更新數量
 
 ### v1.1.3（2026-11-18）
 
