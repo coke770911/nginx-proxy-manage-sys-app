@@ -846,9 +846,10 @@ function applicationSheet(r) {
   return [
     '<section class="sheet">',
     '<h1>網域名稱申請單</h1>',
-    `<div class="meta"><span>規則編號：#${escHtml(r.Id)}</span><span>申請日期：${escHtml(dateOnly(r.CreatedAt))}</span></div>`,
+    `<div class="meta"><span>規則編號：#${escHtml(r.Id)}</span></div>`,
     '<table>',
     '<tr><td colspan="2" class="sec">申請人資料</td></tr>',
+    row('申請日期', escHtml(dateOnly(r.CreatedAt))),
     row('申請單位', v(r.ApplicantUnit)),
     row('申請人', v(r.ApplicantName)),
     row('職稱', v(r.ApplicantTitle)),
