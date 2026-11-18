@@ -57,9 +57,52 @@ const STATS_CMD = [
   'df -Pk / 2>/dev/null | tail -n1',
   WAF_CHECK_CMD, // WAF 模組是否已安裝（唯讀檢查檔案）
   VERSION_CMD,
+  'echo "UP:$(cut -d\' \' -f1 /proc/uptime)"', // 開機秒數
 ].join('; ');
 
+/**
+ * 套件 / OS 更新資訊（唯讀，不需 sudo、不連網）：
+ *  - apt list --upgradable 讀節點本機的套件清單快取（Ubuntu 的 apt-daily.timer 每天自動更新快取）
+ *  - /var/run/reboot-required(.pkgs)：裝了核心等更新後需要重開機
+ *  - /var/lib/ubuntu-release-upgrader/release-upgrade-available：有新版 Ubuntu（由系統排程檢查後寫入）
+ *  - update-success-stamp：套件清單最後更新時間
+ * 比較耗時（約 1–2 秒），每台每 UPDATE_CHECK_MIN 分鐘才檢查一次；按「重新檢測」時強制檢查。
+ */
+const UPDATE_CHECK_MIN = 30;
+const MAX_PKGS = 300;
+const UPDATES_CMD = [
+  'echo "RBT:$([ -f /var/run/reboot-required ] && echo 1 || echo 0)|$(sort -u /var/run/reboot-required.pkgs 2>/dev/null | tr \'\\n\' \' \')"',
+  'echo "REL:$(grep -m1 -o "New release .* available" /var/lib/ubuntu-release-upgrader/release-upgrade-available 2>/dev/null)"',
+  'echo "APTTS:$(stat -c %Y /var/lib/apt/periodic/update-success-stamp 2>/dev/null)"',
+  `apt list --upgradable 2>/dev/null | grep -F 'upgradable from' | head -n ${MAX_PKGS + 1}`,
+].join('; ');
+
+/** 解析更新資訊；套件行格式：nginx/noble-updates 1.24.0-2ubuntu7.5 amd64 [upgradable from: 1.24.0-2ubuntu7.4] */
+function parseUpdates(out) {
+  const text = String(out || '');
+  const rbt = text.match(/^RBT:([01])\|(.*)$/m);
+  const rel = text.match(/^REL:(.*)$/m);
+  const ts = text.match(/^APTTS:(\d+)\s*$/m);
+  const packages = [];
+  text.split('\n').forEach((l) => {
+    const m = l.match(/^([A-Za-z0-9.+:-]+)\/(\S+)\s+(\S+)\s+\S+\s+\[upgradable from: ([^\]]+)\]/);
+    if (m) packages.push({ name: m[1], suite: m[2], version: m[3], from: m[4], security: /-security/.test(m[2]) });
+  });
+  const relText = rel ? rel[1].trim() : '';
+  const relVer = relText.match(/New release '([^']+)'/);
+  return {
+    count: packages.length > MAX_PKGS ? `${MAX_PKGS}+` : packages.length,
+    security: packages.filter((p) => p.security).length,
+    packages: packages.slice(0, MAX_PKGS),
+    rebootRequired: rbt ? rbt[1] === '1' : false,
+    rebootPkgs: rbt ? rbt[2].trim().split(/\s+/).filter(Boolean) : [],
+    newRelease: relText ? (relVer ? relVer[1] : relText) : null,
+    aptUpdatedAt: ts ? new Date(Number(ts[1]) * 1000).toISOString() : null,
+  };
+}
+
 const stats = new Map(); // nodeId -> { cpu, mem, swap, disk, load, cores, at }
+const updates = new Map(); // nodeId -> parseUpdates() + { at } 或 { error, at }
 
 const pct = (used, total) => (total > 0 ? Math.round((used / total) * 1000) / 10 : null);
 
@@ -92,7 +135,8 @@ function parseStats(out) {
     const avail = Number(p[3]) * 1024;
     disk = { mount: '/', total, used, free: avail, percent: pct(used, used + avail) };
   }
-  return { cpu, mem, swap, disk, load, cores, waf: parseWafCheck(out), versions: parseVersions(out) };
+  const up = out.match(/^UP:(\d+)/m);
+  return { cpu, mem, swap, disk, load, cores, uptimeSec: up ? Number(up[1]) : null, waf: parseWafCheck(out), versions: parseVersions(out) };
 }
 
 /** 記錄某節點對後端的測試結果；results 為 null 表示該節點這輪無法測試（清除舊結果，避免顯示過期燈號） */
@@ -109,7 +153,12 @@ function setBackendResults(node, results) {
   });
 }
 
-async function checkNode(node, targets = []) {
+const updatesDue = (id, force) => {
+  const u = updates.get(id);
+  return force || !u || Date.now() - new Date(u.at).getTime() >= UPDATE_CHECK_MIN * 60000;
+};
+
+async function checkNode(node, targets = [], { forceUpdates = false } = {}) {
   const s = new NodeSession(node);
   let status = 'OFFLINE';
   let message = '';
@@ -124,6 +173,14 @@ async function checkNode(node, targets = []) {
       stats.set(node.Id, { ...parseStats(st.stdout), at: new Date().toISOString() });
     } catch (e) {
       stats.set(node.Id, { error: `無法取得資源使用率：${String(e.message || e).slice(0, 200)}`, at: new Date().toISOString() });
+    }
+    if (updatesDue(node.Id, forceUpdates)) {
+      try {
+        const u = await s.exec(UPDATES_CMD, 30000);
+        updates.set(node.Id, { ...parseUpdates(u.stdout), at: new Date().toISOString() });
+      } catch (e) {
+        updates.set(node.Id, { error: `無法取得更新資訊：${String(e.message || e).slice(0, 200)}`, at: new Date().toISOString() });
+      }
     }
     try {
       setBackendResults(node, await backendProbe.probeOnSession(s, targets, { timeout: BACKEND_TIMEOUT, tcpOnly: true }));
@@ -143,16 +200,20 @@ async function checkNode(node, targets = []) {
 }
 
 /** 節點清單加上記憶體中的資源數據（Stats） */
-const withStats = (nodes) => nodes.map((n) => ({ ...n.get({ plain: true }), Stats: stats.get(n.Id) || null }));
+const withStats = (nodes) => nodes.map((n) => ({ ...n.get({ plain: true }), Stats: stats.get(n.Id) || null, Updates: updates.get(n.Id) || null }));
+
+/** 重開機後清掉該節點的更新資訊快取，下次檢查重新取得（reboot-required 會消失） */
+const clearUpdates = (id) => updates.delete(id);
 
 async function listNodes() {
   return withStats(await ProxyNode.findAll({ order: [['Id', 'ASC']] }));
 }
 
-async function checkAllNodes() {
+/** @param {{ forceUpdates?: boolean }} [opts] forceUpdates = 手動「重新檢測」時強制重新取得套件更新資訊 */
+async function checkAllNodes(opts = {}) {
   if (deployService.isRunning()) return listNodes(); // 部署中不干擾
   const nodes = await ProxyNode.findAll({ order: [['Id', 'ASC']] });
-  nodes.filter((n) => !n.IsActive).forEach((n) => { stats.delete(n.Id); setBackendResults(n, null); });
+  nodes.filter((n) => !n.IsActive).forEach((n) => { stats.delete(n.Id); updates.delete(n.Id); setBackendResults(n, null); });
   let targets = [];
   try {
     targets = await loadBackendTargets();
@@ -166,7 +227,7 @@ async function checkAllNodes() {
   const ids = new Set(nodes.map((n) => n.Id));
   backendStatus.forEach((m) => [...m.keys()].forEach((id) => { if (!ids.has(id)) m.delete(id); }));
 
-  await Promise.allSettled(nodes.filter((n) => n.IsActive).map((n) => checkNode(n, targets)));
+  await Promise.allSettled(nodes.filter((n) => n.IsActive).map((n) => checkNode(n, targets, opts)));
   backendCheckedAt = new Date().toISOString();
   return listNodes();
 }
@@ -191,4 +252,4 @@ function startScheduler() {
   setInterval(tick, sec * 1000).unref();
 }
 
-module.exports = { checkAllNodes, listNodes, startScheduler, parseStats, parseVersions, getBackendStatus };
+module.exports = { checkAllNodes, listNodes, startScheduler, parseStats, parseVersions, parseUpdates, clearUpdates, getBackendStatus };

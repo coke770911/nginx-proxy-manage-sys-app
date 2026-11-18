@@ -99,7 +99,7 @@ apt list --upgradable          # 剩下的多半是 phased updates（分批推�
 
 需要重開機時：
 
-1. 一次只重開一台：`sudo reboot`
+1. 一次只重開一台：`sudo reboot`，或在管理介面節點卡片按「重開機」（需 sudoers 有 `deployer ALL=(root) NOPASSWD: /usr/bin/systemctl reboot`；系統會擋下「另一台不是 ONLINE」的情況）。節點卡片也會顯示可更新套件數與「需要重開機」標籤。
 2. Claude 等約 1 分鐘後跑第 1 節健康檢查，確認 ONLINE、`nginx -t` 通過，再處理另一台。
 3. 查看自動更新紀錄：`less /var/log/unattended-upgrades/unattended-upgrades.log`
 

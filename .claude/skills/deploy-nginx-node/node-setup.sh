@@ -62,10 +62,11 @@ sed -i 's/^\(\s*\)#\?\s*server_tokens\s\+\(build\|on\|off\);/\1server_tokens off
 grep -q '^\s*server_tokens off;' /etc/nginx/nginx.conf || sed -i '/http {/a\        server_tokens off;' /etc/nginx/nginx.conf
 rm -f /etc/nginx/sites-enabled/default
 
-echo "== 7. sudoers（只允許 nginx -t 與 reload）=="
+echo "== 7. sudoers（只允許 nginx -t、reload 與管理介面的重開機按鈕）=="
 cat > /tmp/nginx-deployer <<'SUDO'
 deployer ALL=(root) NOPASSWD: /usr/sbin/nginx -t
 deployer ALL=(root) NOPASSWD: /usr/bin/systemctl reload nginx
+deployer ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
 SUDO
 visudo -cf /tmp/nginx-deployer
 install -m 440 -o root -g root /tmp/nginx-deployer /etc/sudoers.d/nginx-deployer

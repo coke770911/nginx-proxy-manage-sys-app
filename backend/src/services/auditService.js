@@ -7,7 +7,7 @@
  */
 const { AuditLog } = require('../models');
 
-const ACTIONS = ['LOGIN', 'LOGIN_FAILED', 'CREATE', 'UPDATE', 'DELETE', 'RENEW', 'DEPLOY', 'CUTOVER_CHECK'];
+const ACTIONS = ['LOGIN', 'LOGIN_FAILED', 'CREATE', 'UPDATE', 'DELETE', 'RENEW', 'DEPLOY', 'CUTOVER_CHECK', 'REBOOT'];
 const TARGETS = ['AUTH', 'RULE', 'CERT', 'NODE', 'DEPLOY', 'ACCOUNT', 'WAF', 'IP'];
 const SECRET_KEYS = new Set(['CertPem', 'KeyPem', 'password', 'pfxPassword']);
 const MAX_VALUE = 300;

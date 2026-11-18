@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection, Download, Document, Aim, Lock, CircleClose, Printer } from '@element-plus/icons-vue';
+import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection, Download, Document, Aim, Lock, CircleClose, Printer, RefreshRight } from '@element-plus/icons-vue';
 import api, { eventsUrl, session, logout } from '../api';
 
 /* ------------------------------------------------------------------ 資料 */
@@ -135,6 +135,7 @@ const AUDIT_ACTION = {
   RENEW: { type: 'warning', text: '憑證續約' },
   DEPLOY: { type: 'info', text: '部署' },
   CUTOVER_CHECK: { type: 'info', text: '切換前檢查' },
+  REBOOT: { type: 'danger', text: '節點重開機' },
 };
 const AUDIT_TARGET = { AUTH: '登入', RULE: '網域規則', CERT: 'SSL 憑證', NODE: 'Nginx 節點', DEPLOY: '部署', ACCOUNT: '帳號管理', WAF: 'WAF 設定', IP: 'IP 存取控制' };
 const audit = reactive({ q: '', action: '', targetType: '', range: null, page: 1, pageSize: 50, total: 0, rows: [], loading: false });
@@ -426,6 +427,42 @@ async function checkNodes() {
     await loadBackendStatus();
     ElMessage.success('節點與後端連線檢測完成');
   } catch (e) { ElMessage.error(e.message); } finally { checking.value = false; }
+}
+
+/* ------------------------------------------------------------------ 節點套件更新資訊與遠端重開機 */
+const nodeUpd = (n) => (n.IsActive && n.Updates && !n.Updates.error ? n.Updates : null);
+function uptimeText(sec) {
+  if (sec == null) return null;
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  return d ? `已開機 ${d} 天 ${h} 小時` : `已開機 ${h} 小時 ${Math.floor((sec % 3600) / 60)} 分`;
+}
+const rebooting = reactive({});
+async function rebootNode(n) {
+  const others = nodes.value.filter((x) => x.IsActive && x.Id !== n.Id);
+  const warn = others.length
+    ? `重開機期間（約 1–3 分鐘）流量會由 F5 轉給 ${others.map((x) => x.NodeName).join('、')}。`
+    : '<b style="color:#f56c6c">這是唯一啟用中的節點，重開機期間所有網站都會中斷！</b>';
+  const pkgs = nodeUpd(n)?.rebootRequired ? '' : '<br>目前節點沒有「需要重開機」的更新。';
+  try {
+    await ElMessageBox.prompt(
+      `確定要重開機節點「${escHtml(n.NodeName)}」（${escHtml(n.IpAddress)}）？<br>${warn}${pkgs}<br><br>請輸入節點名稱確認：`,
+      '節點重開機',
+      {
+        type: 'warning', dangerouslyUseHTMLString: true, confirmButtonText: '重開機', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger',
+        inputPlaceholder: n.NodeName,
+        inputValidator: (v) => (String(v || '').trim() === n.NodeName ? true : '請輸入完全相同的節點名稱'),
+      },
+    );
+  } catch { return; }
+  rebooting[n.Id] = true;
+  try {
+    await api.post(`/nodes/${n.Id}/reboot`, { confirmName: n.NodeName });
+    ElMessage.success(`已送出重開機指令，${n.NodeName} 約 1–3 分鐘後恢復，可按「重新檢測」確認`);
+    nodes.value = await api.get('/nodes');
+  } catch (e) {
+    ElMessage.error({ message: e.message, duration: 8000 });
+  } finally { rebooting[n.Id] = false; }
 }
 
 async function toggleNode(n, v) {
@@ -1105,8 +1142,39 @@ onMounted(() => {
                 WAF：{{ nodeWaf(n).ready ? wafVerText(n) : '模組未安裝' }}
               </span>
             </div>
+            <div v-if="n.IsActive && n.Stats && uptimeText(n.Stats.uptimeSec)" class="node-meta">{{ uptimeText(n.Stats.uptimeSec) }}</div>
+            <!-- 套件 / OS 更新（唯讀檢查，每 30 分鐘一次；按「重新檢測」立即更新） -->
+            <div v-if="nodeUpd(n)" class="node-upd">
+              <el-popover v-if="nodeUpd(n).packages.length" placement="bottom-start" :width="440" trigger="click">
+                <template #reference>
+                  <el-tag size="small" :type="nodeUpd(n).security ? 'danger' : 'warning'" class="upd-tag">
+                    可更新 {{ nodeUpd(n).count }} 個套件{{ nodeUpd(n).security ? `（安全性 ${nodeUpd(n).security}）` : '' }}
+                  </el-tag>
+                </template>
+                <div class="upd-pop">
+                  <div class="hint">
+                    套件清單更新於 {{ fmt(nodeUpd(n).aptUpdatedAt) }}；檢查於 {{ fmt(nodeUpd(n).at) }}。
+                    Ubuntu 的 phased updates 會分批推送，少數套件暫時留著屬正常。更新請用 nginx-node-ops 技能或 SSH 以 sysadmin 執行，兩台輪流。
+                  </div>
+                  <div v-for="p in nodeUpd(n).packages" :key="p.name" class="upd-pkg">
+                    <span class="mono">{{ p.name }}</span>
+                    <el-tag v-if="p.security" size="small" type="danger">安全性</el-tag>
+                    <span class="upd-ver mono">{{ p.from }} → {{ p.version }}</span>
+                  </div>
+                </div>
+              </el-popover>
+              <el-tag v-else size="small" type="success" :title="`檢查於 ${fmt(nodeUpd(n).at)}`">套件已是最新</el-tag>
+              <el-tooltip v-if="nodeUpd(n).rebootRequired" :content="`需要重開機才會生效：${nodeUpd(n).rebootPkgs.join('、') || '（未列出套件）'}`" placement="top">
+                <el-tag size="small" type="danger" effect="dark">需要重開機</el-tag>
+              </el-tooltip>
+              <el-tag v-if="nodeUpd(n).newRelease" size="small" type="info" :title="'有新版 Ubuntu 可升級（do-release-upgrade），屬重大升級，請先在測試機驗證'">新版 Ubuntu {{ nodeUpd(n).newRelease }}</el-tag>
+            </div>
+            <div v-else-if="n.IsActive && n.Updates?.error" class="node-meta waf-miss" :title="n.Updates.error">更新資訊取得失敗</div>
           </div>
           <el-switch :model-value="n.IsActive" size="small" @change="(v) => toggleNode(n, v)" />
+          <el-button size="small" :icon="RefreshRight" circle text :loading="rebooting[n.Id]" :disabled="!n.IsActive"
+                     :title="nodeUpd(n)?.rebootRequired ? '重開機（有更新需要重開機才生效）' : '重開機'" :class="{ 'reboot-hot': nodeUpd(n)?.rebootRequired }"
+                     @click="rebootNode(n)" />
           <el-button size="small" :icon="Document" circle text title="檢視 Nginx Log" @click="openNodeLog(n)" />
           <el-button size="small" :icon="Edit" circle text title="編輯節點" @click="openNode(n)" />
         </div>
@@ -2128,6 +2196,12 @@ onMounted(() => {
 .nodes { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 8px; }
 .node-card { flex: 1 1 280px; max-width: 420px; }
 .node-card.inactive { opacity: 0.6; }
+.node-upd { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.upd-tag { cursor: pointer; }
+.upd-pop { max-height: 360px; overflow: auto; display: flex; flex-direction: column; gap: 4px; }
+.upd-pkg { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.upd-ver { color: #888; font-size: 11px; }
+.reboot-hot { color: #f56c6c; }
 .domain-link { color: var(--el-color-primary); text-decoration: none; word-break: break-all; }
 .domain-link:hover { text-decoration: underline; }
 .alias-tag { margin-left: 6px; cursor: pointer; vertical-align: middle; }

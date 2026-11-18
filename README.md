@@ -254,6 +254,26 @@ pm2 save          # 記住程序清單，服務重啟後自動還原
 - 使用率低於 70% 綠色、70–90% 黃色、超過 90% 紅色。上傳大檔時 Nginx 會把請求暫存到 `/var/lib/nginx`，請特別注意硬碟剩餘空間。
 - 數據只保存在記憶體，後端重啟後要等下一次檢查才會出現；停用的節點不顯示。
 - 卡片另顯示**版本資訊**：作業系統（`/etc/os-release`，例：`Ubuntu 26.04.1 LTS`）、nginx 版本（`nginx -v`），以及 WAF 的 ModSecurity（`libmodsecurity3t64`）與 OWASP CRS（`modsecurity-crs`）版本，例：`WAF：ModSecurity 3.0.14 · CRS 3.3.8`；一樣在健康檢查時以 deployer 唯讀讀取，不需要 sudo。兩台版本不一致時請先更新到相同版本再部署。
+- 卡片顯示**已開機時間**（`/proc/uptime`）。
+
+### 套件 / OS 更新偵測
+
+節點卡片顯示該節點待安裝的更新（唯讀檢查，不需 sudo、不連網）：
+
+- **可更新 N 個套件（安全性 M）**：讀節點本機的 `apt list --upgradable`（套件清單由 Ubuntu 的 `apt-daily.timer` 每天自動更新），點標籤可看套件名稱與「目前版本 → 新版本」；有安全性更新時標籤為紅色。少數套件因 Ubuntu phased updates 分批推送暫時留著屬正常。
+- **需要重開機**：`/var/run/reboot-required` 存在（例如更新了 libc6、核心），滑過可看是哪些套件。
+- **新版 Ubuntu xx**：系統排程偵測到新的 Ubuntu 版本（`/var/lib/ubuntu-release-upgrader/release-upgrade-available`），屬重大升級，請先在測試機驗證。
+- 比較耗時，每台每 30 分鐘檢查一次；按節點區右側「重新檢測」會立即重新取得。
+- 安裝更新仍由管理者以 sysadmin 執行（`sudo apt update && sudo apt full-upgrade`，或 Claude 技能 nginx-node-ops），兩台輪流。
+
+### 遠端重開機
+
+節點卡片的「重開機」按鈕（↻ 圖示；有「需要重開機」時顯示紅色）會以 SSH 執行 `NODE_REBOOT_CMD`（預設 `sudo -n /usr/bin/systemctl reboot`）：
+
+- **節點需先授權**：在 `/etc/sudoers.d/nginx-deployer` 加一行 `deployer ALL=(root) NOPASSWD: /usr/bin/systemctl reboot`（新節點的 `node-setup.sh` 已包含；既有節點以 sysadmin 執行 `sudo visudo -f /etc/sudoers.d/nginx-deployer` 補上）。未授權時按鈕會回錯誤並提示這行設定。
+- **防誤按**：必須輸入節點名稱確認。
+- **維持服務**：部署進行中、其他啟用中節點不是 ONLINE、同一台 10 分鐘內已重開過時都會拒絕，避免兩台同時離線；重開期間 F5 會把流量轉給另一台。
+- 重開機（成功或被拒絕）都記入操作紀錄（動作「節點重開機」）。約 1–3 分鐘後按「重新檢測」確認恢復 ONLINE。
 
 ## 網域規則搜尋
 
@@ -618,7 +638,7 @@ sudo chmod 750 /etc/nginx/ssl
 # 若 sites-enabled/default 佔用 80，請移除以免 default_server 衝突
 ```
 
-`deployer` 需能寫入上述兩個目錄（本系統不使用 sudo 寫檔），sudoers 僅需 `nginx -t` 與 `systemctl reload nginx`。主機金鑰指紋可填入 `ProxyNodes.HostKeySha256`（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 的 `SHA256:...`）以防中間人。
+`deployer` 需能寫入上述兩個目錄（本系統不使用 sudo 寫檔），sudoers 僅需 `nginx -t`、`systemctl reload nginx` 與 `systemctl reboot`（管理介面重開機按鈕用，不需要可省略）。主機金鑰指紋可填入 `ProxyNodes.HostKeySha256`（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 的 `SHA256:...`）以防中間人。
 
 ### 節點初始化與安全加固腳本
 

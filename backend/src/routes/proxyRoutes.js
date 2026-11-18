@@ -13,6 +13,7 @@ const { fetchHostFingerprint } = require('../services/sshSession');
 const backendProbe = require('../services/backendProbe');
 const ruleImport = require('../services/ruleImport');
 const applicant = require('../services/applicant');
+const nodeReboot = require('../services/nodeRebootService');
 const nodeLog = require('../services/nodeLogService');
 const cutoverCheck = require('../services/cutoverCheck');
 const waf = require('../services/wafService');
@@ -96,8 +97,31 @@ router.get('/nodes/:id/logs', wrap(async (req, res) => {
   return undefined;
 }));
 
+// 手動「重新檢測」：同時強制重新取得套件更新資訊（排程檢查每 30 分鐘才取一次）
 router.post('/nodes/check', wrap(async (req, res) => {
-  res.json(await healthService.checkAllNodes());
+  res.json(await healthService.checkAllNodes({ forceUpdates: true }));
+}));
+
+/**
+ * 遠端重開機：body.confirmName 必須與節點名稱完全相同（防誤按）；
+ * 部署中、其他節點不是 ONLINE、10 分鐘內重開過都會拒絕（見 nodeRebootService）
+ */
+router.post('/nodes/:id/reboot', wrap(async (req, res) => {
+  const node = await ProxyNode.findByPk(req.params.id);
+  if (!node) throw new HttpError(404, '節點不存在');
+  if (String(req.body?.confirmName || '').trim() !== node.NodeName) throw new HttpError(400, '確認名稱與節點名稱不符');
+  try {
+    const r = await nodeReboot.rebootNode(node);
+    healthService.clearUpdates(node.Id);
+    await audit.record(req, { action: 'REBOOT', targetType: 'NODE', targetId: node.Id, targetName: nodeName(node), detail: { 指令: config.ssh.rebootCmd } });
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    if (e instanceof nodeReboot.RebootError) {
+      await audit.record(req, { action: 'REBOOT', targetType: 'NODE', targetId: node.Id, targetName: nodeName(node), detail: { status: '失敗', message: e.message } });
+      throw new HttpError(e.status, e.message);
+    }
+    throw e;
+  }
 }));
 
 router.post('/nodes/fingerprint', wrap(async (req, res) => {
