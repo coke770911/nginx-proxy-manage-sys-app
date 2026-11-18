@@ -12,6 +12,7 @@ const healthService = require('../services/healthService');
 const { fetchHostFingerprint } = require('../services/sshSession');
 const backendProbe = require('../services/backendProbe');
 const ruleImport = require('../services/ruleImport');
+const applicant = require('../services/applicant');
 const nodeLog = require('../services/nodeLogService');
 const cutoverCheck = require('../services/cutoverCheck');
 const waf = require('../services/wafService');
@@ -206,13 +207,14 @@ const RULE_FIELDS = [
   'DomainName', 'DomainAliases', 'CertificateId', 'ForceHttps', 'EnableWebSocket', 'Custom404', 'InterceptCodes',
   'ClientMaxBodySize', 'IsActive', 'IsMaintenance', 'CustomNginxSnippet', 'Remark', 'LbMethod', 'LbCookieName',
   'WafMode', 'WafExcludeIds', 'IpAccessMode', 'IpAccessList',
+  ...applicant.KEYS,
 ];
 const RULE_BOOLS = ['ForceHttps', 'EnableWebSocket', 'Custom404', 'IsActive', 'IsMaintenance'];
 const UP_ORDER = [[{ model: RuleUpstream, as: 'Upstreams' }, 'SortOrder', 'ASC'], [{ model: RuleUpstream, as: 'Upstreams' }, 'Id', 'ASC']];
 const withUpstreams = { model: RuleUpstream, as: 'Upstreams', attributes: ['Id', 'Host', 'Port', 'Weight', 'IsBackup', 'IsActive', 'SortOrder'] };
 
 async function checkRule(plain) {
-  const errs = validateRule(plain);
+  const errs = [...validateRule(plain), ...applicant.validate(plain)];
   if (errs.length) throw new HttpError(400, errs.join('；'));
   await ipGroups.assertRefsExist(plain.IpAccessList, 'IP 清單');
   const cert = await SslCertificate.findByPk(plain.CertificateId, { attributes: NO_PEM });
@@ -252,6 +254,7 @@ function normalizeRule(data) {
     out.InterceptCodes = normalizeInterceptCodes(out.InterceptCodes);
     out.Custom404 = String(out.InterceptCodes || '').split(',').includes('404');
   }
+  applicant.normalize(out);
   if ('ClientMaxBodySize' in out) out.ClientMaxBodySize = String(out.ClientMaxBodySize).trim();
   if ('LbMethod' in out) out.LbMethod = String(out.LbMethod || 'round_robin').trim();
   if ('LbCookieName' in out) out.LbCookieName = String(out.LbCookieName || '').trim() || null;

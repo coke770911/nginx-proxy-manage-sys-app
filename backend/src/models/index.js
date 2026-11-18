@@ -39,6 +39,12 @@ const DomainRule = sequelize.define('DomainRule', {
   DomainAliases: { type: DataTypes.TEXT }, // 網域別名，一行一個（v1.0.20 起）
   Custom404: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false }, // 舊欄位（v1.0.20）：與 InterceptCodes 是否含 404 同步
   InterceptCodes: { type: DataTypes.STRING(100) }, // 後端回這些狀態碼時改顯示系統頁面，逗號分隔（v1.1.1 起）
+  // 網域名稱申請單留存（v1.1.2 起，見 services/applicant.js）；申請日期以 CreatedAt 為準
+  ApplicantUnit: { type: DataTypes.STRING(100) },
+  ApplicantName: { type: DataTypes.STRING(50) },
+  ApplicantTitle: { type: DataTypes.STRING(50) },
+  ApplicantExt: { type: DataTypes.STRING(30) },
+  ApplicantEmail: { type: DataTypes.STRING(254) },
   TargetIp: { type: DataTypes.STRING(255), allowNull: false },
   TargetPort: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 80 },
   CertificateId: { type: DataTypes.INTEGER, allowNull: false },

@@ -168,6 +168,17 @@ BEGIN
 END
 GO
 
+/* ---- 網域名稱申請單留存（v1.1.2 起，資安稽核用；申請日期以 CreatedAt 為準）
+        申請單位 / 申請人 / 職稱 / 分機 / Email，皆為選填；只存在資料庫，不寫入 Nginx 設定 ---- */
+IF COL_LENGTH(N'dbo.DomainRules', N'ApplicantUnit') IS NULL
+    ALTER TABLE dbo.DomainRules ADD
+        ApplicantUnit  NVARCHAR(100) NULL,
+        ApplicantName  NVARCHAR(50)  NULL,
+        ApplicantTitle NVARCHAR(50)  NULL,
+        ApplicantExt   NVARCHAR(30)  NULL,
+        ApplicantEmail NVARCHAR(254) NULL;
+GO
+
 /* ---------------------------------------------------------------------------
    3a-2. IpAccessSettings — 全域 IP 黑名單（只有 Id = 1 一筆）
          BlockList：一行一筆 IP / CIDR，「#」後為備註；所有網域一律拒絕，空白 = 不啟用

@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection, Download, Document, Aim, Lock, CircleClose } from '@element-plus/icons-vue';
+import { Upload, Refresh, Plus, Edit, Delete, View, UploadFilled, SwitchButton, Search, Connection, Download, Document, Aim, Lock, CircleClose, Printer } from '@element-plus/icons-vue';
 import api, { eventsUrl, session, logout } from '../api';
 
 /* ------------------------------------------------------------------ 資料 */
@@ -57,6 +57,7 @@ const fmt = (d) => {
   if (Number.isNaN(t.getTime())) return String(d);
   return `${t.getFullYear()}/${pad2(t.getMonth() + 1)}/${pad2(t.getDate())} ${pad2(t.getHours())}:${pad2(t.getMinutes())}:${pad2(t.getSeconds())}`;
 };
+const dateOnly = (d) => (d ? fmt(d).slice(0, 10) : '—');
 /** 距今幾天沒變動（以當地日曆日計算，今天更動＝0） */
 const idleDays = (d) => {
   const t = new Date(d);
@@ -111,12 +112,17 @@ const STATUS_TAG = {
 
 /* ------------------------------------------------------------------ 規則搜尋（網域 / IP） */
 const ruleQuery = ref('');
+const onlyNoApplicant = ref(false);
+/* 網域名稱申請單：以「申請單位」與「申請人」都有值視為已填（與後端 applicant.isFilled 相同） */
+const hasApplicant = (r) => !!(r.ApplicantUnit && r.ApplicantName);
 const filteredRules = computed(() => {
   const q = ruleQuery.value.trim().toLowerCase();
-  if (!q) return rules.value;
-  return rules.value.filter((r) => r.DomainName.toLowerCase().includes(q)
+  const base = onlyNoApplicant.value ? rules.value.filter((r) => !hasApplicant(r)) : rules.value;
+  if (!q) return base;
+  return base.filter((r) => r.DomainName.toLowerCase().includes(q)
     || aliasList(r.DomainAliases).some((a) => a.includes(q))
-    || ruleUpstreams(r).some((u) => `${u.Host}:${u.Port}`.toLowerCase().includes(q)));
+    || ruleUpstreams(r).some((u) => `${u.Host}:${u.Port}`.toLowerCase().includes(q))
+    || [r.ApplicantUnit, r.ApplicantName, r.ApplicantEmail].some((v) => String(v || '').toLowerCase().includes(q)));
 });
 
 /* ------------------------------------------------------------------ 操作紀錄 */
@@ -160,6 +166,7 @@ const FIELD_LABEL = {
   Upstreams: '後端主機', LbMethod: '分配方式', LbCookieName: 'Cookie 名稱',
   WafMode: 'WAF 模式', WafExcludeIds: 'WAF 排除規則', Enabled: 'WAF 總開關', ParanoiaLevel: '嚴格程度', InboundThreshold: '阻擋門檻',
   IpAccessMode: 'IP 存取控制', IpAccessList: 'IP 清單', 筆數: '筆數', 新增: '新增', 移除: '移除',
+  ApplicantUnit: '申請單位', ApplicantName: '申請人', ApplicantTitle: '申請人職稱', ApplicantExt: '申請人分機', ApplicantEmail: '申請人 Email',
   reason: '原因', source: '帳號來源', status: '狀態', message: '訊息',
 };
 const auditDetail = (d) => {
@@ -504,7 +511,9 @@ const blankRule = () => ({
   IsActive: true, IsMaintenance: false, CustomNginxSnippet: '', Remark: '',
   LbMethod: 'round_robin', LbCookieName: '', Upstreams: [blankUpstream()],
   WafMode: 'off', WafExcludeIds: '', IpAccessMode: 'off', IpAccessList: '',
+  ApplicantUnit: '', ApplicantName: '', ApplicantTitle: '', ApplicantExt: '', ApplicantEmail: '',
 });
+const APPLICANT_KEYS = ['ApplicantUnit', 'ApplicantName', 'ApplicantTitle', 'ApplicantExt', 'ApplicantEmail'];
 const LB_METHOD = {
   round_robin: { text: '輪流', hint: '依權重輪流分配，適合大多數系統' },
   least_conn: { text: '最少連線', hint: '優先送給目前連線數最少的主機，適合處理時間長短差異大的系統' },
@@ -545,13 +554,18 @@ const ruleRules = {
   LbCookieName: [{ validator: (_r, v, cb) => (ruleDlg.form.LbMethod !== 'cookie' || /^[A-Za-z0-9_]{1,64}$/.test(v || '') ? cb() : cb(new Error('Cookie 名稱只能用英數字與底線'))), trigger: 'blur' }],
   CertificateId: [{ required: true, message: '請選擇 SSL 憑證', trigger: 'change' }],
   IpAccessList: [{ validator: (_r, v, cb) => (ruleDlg.form.IpAccessMode === 'off' || ipListCount(v) ? cb() : cb(new Error(ruleDlg.form.IpAccessMode === 'allow' ? '「只允許」至少要填一筆，否則所有人都無法連線' : '請至少填一筆 IP 或網段'))), trigger: 'blur' }],
+  // 申請單：新增規則時「申請單位」「申請人」必填；既有規則未填時只提示，不擋儲存（避免緊急修改後端時被卡住）
+  ApplicantUnit: [{ validator: (_r, v, cb) => (ruleDlg.id || String(v || '').trim() ? cb() : cb(new Error('請填寫申請單位'))), trigger: 'blur' }],
+  ApplicantName: [{ validator: (_r, v, cb) => (ruleDlg.id || String(v || '').trim() ? cb() : cb(new Error('請填寫申請人'))), trigger: 'blur' }],
+  ApplicantEmail: [{ validator: (_r, v, cb) => (!String(v || '').trim() || /^[^\s@<>()",;:]{1,64}@([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(String(v).trim()) ? cb() : cb(new Error('Email 格式不正確'))), trigger: 'blur' }],
+  ApplicantExt: [{ validator: (_r, v, cb) => (!String(v || '').trim() || /^[0-9#*()+\-,. ]{1,30}$/.test(String(v).trim()) ? cb() : cb(new Error('分機只能填數字與 # - ( ) 等符號'))), trigger: 'blur' }],
   WafExcludeIds: [{ validator: (_r, v, cb) => (String(v || '').split(/[\s,，、]+/).filter(Boolean).every((x) => /^\d{6,7}$/.test(x)) ? cb() : cb(new Error('只能填 6–7 位數字的規則 ID，以逗號分隔'))), trigger: 'blur' }],
 };
 
 function openRule(row) {
   ruleDlg.id = row ? row.Id : null;
   ruleDlg.form = row
-    ? { ...blankRule(), ...row, certificate: undefined, DomainAliases: row.DomainAliases || '', LbCookieName: row.LbCookieName || '', WafMode: row.WafMode || 'off', WafExcludeIds: row.WafExcludeIds || '', IpAccessMode: row.IpAccessMode || 'off', IpAccessList: row.IpAccessList || '', InterceptList: interceptList(row), Upstreams: ruleUpstreams(row).map(({ Host, Port, Weight, IsBackup, IsActive }) => ({ Host, Port, Weight, IsBackup, IsActive })) }
+    ? { ...blankRule(), ...row, certificate: undefined, DomainAliases: row.DomainAliases || '', LbCookieName: row.LbCookieName || '', WafMode: row.WafMode || 'off', WafExcludeIds: row.WafExcludeIds || '', IpAccessMode: row.IpAccessMode || 'off', IpAccessList: row.IpAccessList || '', InterceptList: interceptList(row), ...Object.fromEntries(APPLICANT_KEYS.map((k) => [k, row[k] || ''])), Upstreams: ruleUpstreams(row).map(({ Host, Port, Weight, IsBackup, IsActive }) => ({ Host, Port, Weight, IsBackup, IsActive })) }
     : blankRule();
   ruleDlg.visible = true;
 }
@@ -658,10 +672,10 @@ async function copyPassDomains() {
 
 /* ------------------------------------------------------------------ 規則匯入 / 匯出（CSV） */
 const IMPORT_TEMPLATE = [
-  '來源網域,網域別名,後端主機,分配方式,Cookie名稱,SSL憑證,強制HTTPS,WebSocket,上傳上限,啟用,維護中,備註',
-  'portal.example.edu.tw,www.portal.example.edu.tw,10.0.0.21:8080,,,,是,否,50M,是,否,單一後端',
-  'app.example.edu.tw,,10.0.0.31:8080*3; 10.0.0.32:8080; 10.0.0.33:8080(備援),最少連線,,,是,否,100M,是,否,三台後端：權重 3:1，第三台為備援',
-  'erp.example.edu.tw,,10.0.0.41:80; 10.0.0.42:80,依Cookie固定,JSESSIONID,,是,否,50M,是,否,登入狀態固定在同一台',
+  '來源網域,網域別名,後端主機,分配方式,Cookie名稱,SSL憑證,強制HTTPS,WebSocket,上傳上限,啟用,維護中,備註,申請單位,申請人,申請人職稱,申請人分機,申請人Email',
+  'portal.example.edu.tw,www.portal.example.edu.tw,10.0.0.21:8080,,,,是,否,50M,是,否,單一後端,圖書館,王小明,組員,1234,user@example.edu.tw',
+  'app.example.edu.tw,,10.0.0.31:8080*3; 10.0.0.32:8080; 10.0.0.33:8080(備援),最少連線,,,是,否,100M,是,否,三台後端：權重 3:1，第三台為備援,,,,,',
+  'erp.example.edu.tw,,10.0.0.41:80; 10.0.0.42:80,依Cookie固定,JSESSIONID,,是,否,50M,是,否,登入狀態固定在同一台,,,,,',
 ].join('\r\n');
 const IMP_STATUS = {
   new: { type: 'success', text: '新增' },
@@ -695,6 +709,71 @@ function downloadBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 const downloadTemplate = () => downloadBlob(new Blob(['\uFEFF' + IMPORT_TEMPLATE + '\r\n'], { type: 'text/csv;charset=utf-8' }), '網域規則匯入範本.csv');
+/* ------------------------------------------------------------------ 網域名稱申請單列印（一條規則一頁，瀏覽器另存 PDF） */
+const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const PRINT_CSS = [
+  '@page{size:A4;margin:16mm 14mm}',
+  '*{box-sizing:border-box}',
+  'body{margin:0;font-family:"Microsoft JhengHei","PingFang TC","Noto Sans TC",sans-serif;color:#111;font-size:13px}',
+  '.sheet{page-break-after:always;break-after:page}.sheet:last-child{page-break-after:auto;break-after:auto}',
+  'h1{text-align:center;font-size:22px;letter-spacing:.3em;margin:0 0 4px}',
+  '.meta{display:flex;justify-content:space-between;font-size:12px;color:#444;margin-bottom:8px}',
+  'table{width:100%;border-collapse:collapse;margin-bottom:12px}',
+  'th,td{border:1px solid #333;padding:7px 9px;vertical-align:top;text-align:left;word-break:break-all}',
+  'th{width:22%;background:#f1f1f1;font-weight:600;white-space:nowrap}',
+  '.sec{background:#e4e4e4;text-align:center;font-weight:700;letter-spacing:.2em}',
+  '.mono{font-family:Consolas,monospace}',
+  '.sign td{height:70px;text-align:center;vertical-align:bottom;color:#666;font-size:12px;width:25%}',
+  '.empty{color:#999}',
+  '.note{font-size:11px;color:#555;line-height:1.6}',
+  '@media screen{body{background:#eee}.sheet{background:#fff;width:210mm;min-height:297mm;margin:12px auto;padding:16mm 14mm;box-shadow:0 1px 6px rgba(0,0,0,.2)}}',
+].join('');
+function applicationSheet(r) {
+  const v = (x) => (x ? escHtml(x) : '<span class="empty">（未填）</span>');
+  const ups = ruleUpstreams(r).map((u) => `${u.Host}:${u.Port}${u.IsBackup ? '（備援）' : ''}${u.IsActive ? '' : '（停用）'}`).join('<br>');
+  const aliases = aliasList(r.DomainAliases);
+  const row = (k, val, cls = '') => `<tr><th>${k}</th><td${cls ? ` class="${cls}"` : ''}>${val}</td></tr>`;
+  return [
+    '<section class="sheet">',
+    '<h1>網域名稱申請單</h1>',
+    `<div class="meta"><span>規則編號：#${escHtml(r.Id)}</span><span>申請日期：${escHtml(dateOnly(r.CreatedAt))}</span></div>`,
+    '<table>',
+    '<tr><td colspan="2" class="sec">申請人資料</td></tr>',
+    row('申請單位', v(r.ApplicantUnit)),
+    row('申請人', v(r.ApplicantName)),
+    row('職稱', v(r.ApplicantTitle)),
+    row('分機', v(r.ApplicantExt)),
+    row('Email', v(r.ApplicantEmail)),
+    '<tr><td colspan="2" class="sec">網域設定</td></tr>',
+    row('網域名稱', escHtml(r.DomainName), 'mono'),
+    row('網域別名', aliases.length ? aliases.map(escHtml).join('<br>') : '無', 'mono'),
+    row('後端主機', ups || '—', 'mono'),
+    row('SSL 憑證', escHtml(r.certificate ? `${r.certificate.Alias}（到期 ${dateOnly(r.certificate.ValidTo)}）` : '—')),
+    row('強制 HTTPS', r.ForceHttps ? '是' : '否'),
+    row('WAF 防護', escHtml((WAF_MODE[r.WafMode || 'off'] || {}).text || r.WafMode)),
+    row('IP 存取控制', escHtml((IP_MODE[r.IpAccessMode || 'off'] || {}).text || r.IpAccessMode)),
+    row('狀態', `${r.IsActive ? '啟用' : '停用'}${r.IsMaintenance ? '（維護中）' : ''}`),
+    row('備註', r.Remark ? escHtml(r.Remark) : '—'),
+    '</table>',
+    '<table class="sign"><tr><th style="text-align:center">申請人</th><th style="text-align:center">單位主管</th><th style="text-align:center">承辦人</th><th style="text-align:center">資訊單位主管</th></tr>',
+    '<tr><td>簽章</td><td>簽章</td><td>簽章</td><td>簽章</td></tr></table>',
+    `<div class="note">本申請單由 Nginx HA Proxy Manager 依系統登錄資料產生（列印時間 ${escHtml(fmt(new Date()))}），申請日期以規則建立日期為準。</div>`,
+    '</section>',
+  ].join('');
+}
+function printApplications() {
+  const list = ruleSelection.value.length ? ruleSelection.value : filteredRules.value;
+  if (!list.length) { ElMessage.info('沒有可列印的規則'); return; }
+  const w = window.open('', '_blank');
+  if (!w) { ElMessage.error('瀏覽器擋下了新視窗，請允許本網站開啟彈出視窗後再試'); return; }
+  const missing = list.filter((r) => !hasApplicant(r)).length;
+  w.document.open();
+  w.document.write(`<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8"><title>網域名稱申請單（${list.length} 張）</title><style>${PRINT_CSS}</style></head><body>${list.map(applicationSheet).join('')}</body></html>`);
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 400);
+  ElMessage.success(`已產生 ${list.length} 張申請單，列印視窗選「另存為 PDF」即可存檔${missing ? `（其中 ${missing} 張尚未填申請人資料）` : ''}`);
+}
 async function exportRules() {
   try {
     const blob = await api.get('/rules/export.csv', { responseType: 'blob' });
@@ -1055,6 +1134,8 @@ onMounted(() => {
           <el-button type="primary" :icon="Plus" @click="openRule(null)">新增規則</el-button>
           <el-button :icon="Upload" @click="openImport">匯入</el-button>
           <el-button :icon="Download" @click="exportRules">匯出</el-button>
+          <el-button :icon="Printer" :title="ruleSelection.length ? '列印勾選規則的申請單（一條規則一頁，可另存 PDF）' : '列印目前列表全部規則的申請單（一條規則一頁，可另存 PDF）'"
+                     @click="printApplications">列印申請單{{ ruleSelection.length ? `（${ruleSelection.length}）` : '' }}</el-button>
           <el-button :icon="Aim" :disabled="!cutoverCfg.enabled"
                      :title="!cutoverCfg.enabled ? '尚未設定 CUTOVER_VIP'
                        : ruleSelection.length ? `模擬 DNS 改指 ${cutoverCfg.vip} 後的連線結果（唯讀）` : '請先勾選表格左側要檢查的規則（可多選）'"
@@ -1064,7 +1145,8 @@ onMounted(() => {
           <span class="hint">修改後需按右上角「一鍵同步部署」才會推送到 Nginx 節點。</span>
         </div>
         <div class="toolbar search-bar">
-          <el-input v-model="ruleQuery" :prefix-icon="Search" clearable placeholder="搜尋網域或後端 IP" class="search" />
+          <el-input v-model="ruleQuery" :prefix-icon="Search" clearable placeholder="搜尋網域、後端 IP 或申請人" class="search" />
+          <el-checkbox v-model="onlyNoApplicant">只看未填申請單（{{ rules.filter((r) => !hasApplicant(r)).length }}）</el-checkbox>
           <!-- 表格右上角：目前筆數（搜尋時顯示符合 / 全部） -->
           <span class="row-count">
             <template v-if="ruleQuery">找到 <b>{{ filteredRules.length }}</b> / {{ rules.length }} 筆</template>
@@ -1142,6 +1224,21 @@ onMounted(() => {
           </el-table-column>
           <el-table-column label="維護中頁面" width="110" align="center">
             <template #default="{ row }"><el-switch :model-value="row.IsMaintenance" size="small" active-color="#e6a23c" @change="(v) => quickToggle(row, 'IsMaintenance', v)" /></template>
+          </el-table-column>
+          <el-table-column label="申請單" min-width="150">
+            <template #default="{ row }">
+              <el-popover v-if="hasApplicant(row)" placement="bottom-start" :width="280" trigger="hover">
+                <template #reference><span class="applicant-cell">{{ row.ApplicantUnit }}<br><small>{{ row.ApplicantName }}</small></span></template>
+                <div class="applicant-pop">
+                  <div><b>申請單位</b>{{ row.ApplicantUnit }}</div>
+                  <div><b>申請人</b>{{ row.ApplicantName }}{{ row.ApplicantTitle ? `（${row.ApplicantTitle}）` : '' }}</div>
+                  <div><b>分機</b>{{ row.ApplicantExt || '—' }}</div>
+                  <div><b>Email</b>{{ row.ApplicantEmail || '—' }}</div>
+                  <div><b>申請日期</b>{{ dateOnly(row.CreatedAt) }}</div>
+                </div>
+              </el-popover>
+              <el-tag v-else size="small" type="warning">未填申請單</el-tag>
+            </template>
           </el-table-column>
           <el-table-column prop="Remark" label="備註" min-width="160" show-overflow-tooltip />
           <el-table-column prop="CreatedAt" label="建立日期" width="170" align="center" sortable>
@@ -1473,6 +1570,7 @@ onMounted(() => {
               <li><b>分配方式</b>：輪流 / 最少連線 / 依Cookie固定（需填 <b>Cookie名稱</b>）；空白 = 輪流</li>
               <li><b>SSL憑證</b>：憑證別名；空白會自動選涵蓋該網域、到期日最晚的憑證</li>
               <li><b>強制HTTPS、WebSocket、啟用、維護中</b>：是 / 否；<b>上傳上限</b>：例 50M；<b>備註</b></li>
+              <li><b>申請單位、申請人、申請人職稱、申請人分機、申請人Email</b>：網域名稱申請單留存（選填，未填會提示）</li>
               <li>空白欄位：新增時用預設值，覆蓋既有規則時保留原值；自訂 Nginx 語法不會被匯入覆蓋</li>
               <li><b>重複</b> = 與既有規則或檔案中其他列「網域相同且後端 IP:Port 相同」，匯入前會提示，可刪除</li>
             </ul>
@@ -1500,6 +1598,7 @@ onMounted(() => {
             </el-table-column>
             <el-table-column prop="DomainName" label="來源網域" min-width="170" show-overflow-tooltip />
             <el-table-column prop="AliasesText" label="網域別名" min-width="150" show-overflow-tooltip />
+            <el-table-column prop="ApplicantText" label="申請單位 / 申請人" min-width="150" show-overflow-tooltip />
             <el-table-column label="後端主機" min-width="200">
               <template #default="{ row }">
                 <div class="imp-backends">{{ row.BackendsText || '—' }}</div>
@@ -1782,6 +1881,18 @@ onMounted(() => {
                     placeholder="插入 443 server 區塊，例如：&#10;proxy_buffering off;&#10;add_header X-Frame-Options SAMEORIGIN;" />
         </el-form-item>
         <el-form-item label="備註"><el-input v-model="ruleDlg.form.Remark" maxlength="500" /></el-form-item>
+        <el-divider content-position="left">網域名稱申請單</el-divider>
+        <el-alert v-if="ruleDlg.id && !hasApplicant(ruleDlg.form)" type="warning" :closable="false" show-icon class="applicant-warn"
+                  title="此規則尚未填寫申請單（依資安要求，每個網域都需留存申請資料）" />
+        <el-form-item label="申請單位" prop="ApplicantUnit" :required="!ruleDlg.id"><el-input v-model="ruleDlg.form.ApplicantUnit" maxlength="100" placeholder="例：圖書資訊處" /></el-form-item>
+        <el-form-item label="申請人" prop="ApplicantName" :required="!ruleDlg.id"><el-input v-model="ruleDlg.form.ApplicantName" maxlength="50" /></el-form-item>
+        <el-form-item label="申請人職稱"><el-input v-model="ruleDlg.form.ApplicantTitle" maxlength="50" placeholder="例：組員" /></el-form-item>
+        <el-form-item label="申請人分機" prop="ApplicantExt"><el-input v-model="ruleDlg.form.ApplicantExt" maxlength="30" placeholder="例：1234" style="width: 200px" /></el-form-item>
+        <el-form-item label="申請人 Email" prop="ApplicantEmail"><el-input v-model="ruleDlg.form.ApplicantEmail" maxlength="254" placeholder="例：user@example.edu.tw" /></el-form-item>
+        <el-form-item label="申請日期">
+          <span>{{ ruleDlg.id ? dateOnly(rules.find((r) => r.Id === ruleDlg.id)?.CreatedAt) : '儲存後以建立日期為準' }}</span>
+          <span class="hint" style="margin-left: 8px">（以規則建立日期為準）</span>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button v-if="ruleDlg.id" class="rule-del-btn" type="danger" plain :icon="Delete" :disabled="ruleDlg.saving"
@@ -2021,6 +2132,11 @@ onMounted(() => {
 .domain-link:hover { text-decoration: underline; }
 .alias-tag { margin-left: 6px; cursor: pointer; vertical-align: middle; }
 .alias-pop { display: flex; flex-direction: column; gap: 4px; word-break: break-all; }
+.applicant-cell { cursor: default; line-height: 1.35; }
+.applicant-cell small { color: #888; }
+.applicant-pop { display: flex; flex-direction: column; gap: 4px; word-break: break-all; }
+.applicant-pop b { display: inline-block; width: 64px; color: #888; font-weight: normal; }
+.applicant-warn { margin: 0 0 14px; }
 .date-cell { font-size: 12px; color: #606266; white-space: nowrap; }
 .waf-ok { color: #67c23a; }
 .waf-miss { color: #f56c6c; }

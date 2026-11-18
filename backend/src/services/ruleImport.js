@@ -15,10 +15,12 @@
  *   SSL憑證 Certificate  憑證別名或編號；空白 = 自動選涵蓋此網域、到期日最晚的憑證
  *   強制HTTPS ForceHttps / WebSocket EnableWebSocket / 啟用 IsActive / 維護中 IsMaintenance：是/否、Y/N、1/0、true/false
  *   上傳上限 ClientMaxBodySize / 備註 Remark
+ *   申請單位 ApplicantUnit / 申請人 ApplicantName / 申請人職稱 ApplicantTitle / 申請人分機 ApplicantExt / 申請人Email ApplicantEmail
  * 空白欄位：新增時用預設值，覆蓋既有規則時保留原值。自訂 Nginx 語法不在匯入範圍內（保留原值）。
  */
 const { validateRule, parseAliases, domainsOf } = require('./nginxTemplate');
 const { certCoversDomain } = require('./certService');
+const applicant = require('./applicant');
 
 const MAX_ROWS = 500;
 const DOMAIN_RE = /^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i; // 與 nginxTemplate 相同
@@ -36,6 +38,8 @@ const COLUMNS = [
   { key: 'IsActive', title: '啟用', alias: ['active', 'enabled'] },
   { key: 'IsMaintenance', title: '維護中', alias: ['maintenance', '維護中頁面'] },
   { key: 'Remark', title: '備註', alias: ['remark', 'note'] },
+  // 網域名稱申請單（選填；空白 = 新增時不填、覆蓋時保留原值）
+  ...applicant.FIELDS.map(({ key, title, alias }) => ({ key, title, alias })),
 ];
 const BOOL_KEYS = ['ForceHttps', 'EnableWebSocket', 'IsActive', 'IsMaintenance'];
 const LB_NAMES = {
@@ -132,6 +136,8 @@ function rowsFromCsv(text) {
       ClientMaxBodySize: get('ClientMaxBodySize') || null,
       Remark: get('Remark') || null,
     };
+    applicant.KEYS.forEach((k) => { row[k] = get(k) || null; });
+    applicant.normalize(row);
     const lb = norm(get('LbMethod'));
     if (lb) {
       row.LbMethod = LB_NAMES[lb] || null;
@@ -150,7 +156,9 @@ const backendText = (ups) => (ups || []).map((u) => `${u.Host}:${u.Port}${Number
 function cleanClientRow(r, i) {
   const s = (v, max) => (v === null || v === undefined || v === '' ? null : String(v).trim().slice(0, max));
   const b = (v) => (v === null || v === undefined || v === '' ? null : v === true || v === 'true' || v === 1 || v === '1');
+  const app = applicant.normalize(Object.fromEntries(applicant.FIELDS.map((f) => [f.key, s(r?.[f.key], f.max + 1)])));
   return {
+    ...app,
     line: Number(r?.line) || i + 1,
     DomainName: String(r?.DomainName || '').trim().toLowerCase(),
     DomainAliases: r?.DomainAliases ? parseAliases(String(r.DomainAliases).slice(0, 20000)).join('\n') || null : null,
@@ -219,6 +227,9 @@ function analyze(rows, existing, certs) {
       Remark: pickv('Remark', null),
     };
     merged.LbCookieName = merged.LbMethod === 'cookie' ? pickv('LbCookieName', null) : null;
+    applicant.KEYS.forEach((k) => { merged[k] = pickv(k, null); });
+    applicant.validate(merged).forEach((e) => errors.push(e));
+    if (!applicant.isFilled(merged)) warnings.push('尚未填寫網域申請單（申請單位、申請人）');
     merged.DomainAliases = pickv('DomainAliases', null);
     const aliasList = parseAliases(merged.DomainAliases);
     if (cert && domainOk) {
@@ -274,6 +285,8 @@ function analyze(rows, existing, certs) {
       LbMethod: row.LbMethod, LbCookieName: row.LbCookieName, Certificate: row.Certificate,
       ForceHttps: row.ForceHttps, EnableWebSocket: row.EnableWebSocket, IsActive: row.IsActive, IsMaintenance: row.IsMaintenance,
       ClientMaxBodySize: row.ClientMaxBodySize, Remark: row.Remark,
+      ...Object.fromEntries(applicant.KEYS.map((k) => [k, row[k]])),
+      ApplicantText: [merged.ApplicantUnit, merged.ApplicantName].filter(Boolean).join(' '),
       CertAlias: cert ? cert.Alias : null,
       LbText: LB_TEXT[merged.LbMethod] || merged.LbMethod,
       existingId: ex ? ex.Id : null,
@@ -296,6 +309,7 @@ function toCsv(rules, certs) {
     r.DomainName, parseAliases(r.DomainAliases).join('; '), backendText(r.Upstreams), LB_TEXT[r.LbMethod] || r.LbMethod, r.LbCookieName || '',
     (certs.find((c) => c.Id === r.CertificateId) || {}).Alias || r.CertificateId,
     yn(r.ForceHttps), yn(r.EnableWebSocket), r.ClientMaxBodySize, yn(r.IsActive), yn(r.IsMaintenance), r.Remark || '',
+    ...applicant.KEYS.map((k) => r[k] || ''),
   ]);
   return `﻿${[head, ...lines].map((l) => l.map(csvCell).join(',')).join('\r\n')}\r\n`;
 }

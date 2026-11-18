@@ -95,6 +95,7 @@
 │     └─ services/
 │        ├─ portalAuth.js       校內 portal 認證 REST API：帳密驗證、姓名 / 單位查詢（userDataConnect）
 │        ├─ captchaService.js   登入圖片驗證碼（四碼數字 PNG，一次性、3 分鐘到期）
+│        ├─ applicant.js        網域名稱申請單欄位（整理與格式驗證）
 │        ├─ accountService.js   可登入名單（資料庫帳號 + .env 特權帳號）
 │        ├─ auditService.js     系統操作紀錄寫入（不含密碼 / 私鑰）
 │        ├─ certService.js      憑證解析 / 公私鑰比對 / PFX 轉檔
@@ -280,6 +281,16 @@ server_name portal.aeust.edu.tw www.portal.aeust.edu.tw;
 - **雜湊表**：預設站台設定檔（`_default_server.conf`）在 http 層設定 `server_names_hash_bucket_size 128;`、`server_names_hash_max_size 2048;`，避免名稱變多變長時出現 `could not build server_names_hash`。節點的 `nginx.conf` 不可再另外設定這兩個值（重複會讓 `nginx -t` 失敗，部署會自動回滾）。
 - **資料庫升級**：`DomainRules` 新增 `DomainAliases NVARCHAR(MAX) NULL`；既有資料庫執行一次 `database/schema.sql`（已用 `COL_LENGTH` 判斷，可重複執行）即可，未填別名的規則設定檔與先前完全相同（只多 http 層的雜湊設定）。
 
+## 網域名稱申請單留存
+
+依資安要求，每個對外網域都要有申請單。系統不做申請流程，只在每條規則留存申請人資料，並可批次列印成 PDF：
+
+- **欄位**（規則編輯視窗最下方「網域名稱申請單」）：申請單位、申請人、申請人職稱、申請人分機、申請人 Email。**申請日期以規則建立日期為準**，不另外填。
+- **新增規則**時「申請單位」「申請人」必填；既有規則未填時編輯視窗會提示，但不擋儲存（避免緊急修改後端時被卡住）。
+- **清單**：「申請單」欄顯示單位與申請人，滑過可看完整資料；未填顯示橘色「未填申請單」。搜尋框也比對申請單位、申請人、Email；勾選「只看未填申請單」可列出待補的規則。
+- **列印申請單**：工具列「列印申請單」，有勾選規則就印勾選的、沒勾選就印目前列表（含搜尋 / 篩選結果）。**一條規則一頁 A4**，內容含申請人資料、網域設定（網域、別名、後端、憑證、WAF、IP 限制）與簽章欄；在列印視窗選「另存為 PDF」即可一次存成一個 PDF 檔。由瀏覽器產生，伺服器不需安裝字型或 PDF 套件。
+- 資料庫欄位：`DomainRules.ApplicantUnit / ApplicantName / ApplicantTitle / ApplicantExt / ApplicantEmail`（v1.1.2 起，執行 `database/schema.sql` 補上）。這些欄位只存在資料庫，**不會寫入 Nginx 設定**；修改會記入操作紀錄。匯出的 CSV 與列印的申請單含個人資料，請妥善保管。
+
 ## 網域規則匯入 / 匯出（CSV）
 
 「網域對照規則」分頁的 **匯入** / **匯出** 按鈕可批次管理規則。匯出檔可以直接修改後再匯入；匯入對話框也有「下載範本」。
@@ -296,6 +307,7 @@ server_name portal.aeust.edu.tw www.portal.aeust.edu.tw;
 | 強制HTTPS、WebSocket、啟用、維護中 | 是 / 否 |
 | 上傳上限 | 例 `50M`；空白＝預設 `2M`（新增規則時表單預設也是 `2M`，已存在的規則不受影響） |
 | 備註 | 任意文字 |
+| 申請單位、申請人、申請人職稱、申請人分機、申請人Email | 網域名稱申請單留存，選填；未填「申請單位」或「申請人」時預覽會提示。Email、分機會檢查格式 |
 
 **匯入流程**：選擇檔案 → 系統逐列檢查格式並與現有規則比對 → 預覽 → 確認後才寫入資料庫。
 
