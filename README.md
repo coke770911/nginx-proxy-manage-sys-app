@@ -268,7 +268,7 @@ pm2 save          # 記住程序清單，服務重啟後自動還原
 
 ### 遠端重開機
 
-節點卡片的「重開機」按鈕（↻ 圖示；有「需要重開機」時顯示紅色）會以 SSH 執行 `NODE_REBOOT_CMD`（預設 `sudo -n /usr/bin/systemctl reboot`）：
+節點卡片下方一列有「重開機」「Log」「編輯」三個按鈕（「一鍵同步部署」位於節點卡片上方）。「重開機」（有「需要重開機」時顯示紅色）會以 SSH 執行 `NODE_REBOOT_CMD`（預設 `sudo -n /usr/bin/systemctl reboot`）：
 
 - **節點需先授權**：在 `/etc/sudoers.d/nginx-deployer` 加一行 `deployer ALL=(root) NOPASSWD: /usr/bin/systemctl reboot`（新節點的 `node-setup.sh` 已包含；既有節點以 sysadmin 執行 `sudo visudo -f /etc/sudoers.d/nginx-deployer` 補上）。未授權時按鈕會回錯誤並提示這行設定。
 - **防誤按**：必須輸入節點名稱確認。

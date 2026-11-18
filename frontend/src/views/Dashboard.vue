@@ -1112,10 +1112,6 @@ onMounted(() => {
         <div class="sub">反向代理伺服器節點管理系統</div>
       </div>
       <div class="actions">
-        <el-tag v-if="pendingChanges" type="warning" effect="light" round>有尚未部署的變更</el-tag>
-        <el-button type="primary" size="large" :icon="Upload" :loading="deploying" @click="startDeploy">
-          一鍵同步部署
-        </el-button>
         <span class="user" :title="session.departments.length ? `單位：${session.departments.join('、')}` : ''">
           <template v-if="session.name">{{ session.name }}<span class="user-acc">（{{ session.username }}）</span></template>
           <template v-else>{{ session.username }}</template>
@@ -1124,6 +1120,15 @@ onMounted(() => {
         <el-button :icon="SwitchButton" circle title="登出" @click="logout" />
       </div>
     </header>
+
+    <!-- 一鍵同步部署（位於節點卡片上方） -->
+    <div class="deploy-bar">
+      <el-button type="primary" size="large" :icon="Upload" :loading="deploying" @click="startDeploy">
+        一鍵同步部署
+      </el-button>
+      <el-tag v-if="pendingChanges" type="warning" effect="light" round>有尚未部署的變更</el-tag>
+      <span class="hint">把資料庫中的規則、憑證與 WAF / IP 設定推送到所有啟用中的節點（全部 nginx -t 通過才 reload）</span>
+    </div>
 
     <!-- 節點狀態燈號 -->
     <section class="nodes">
@@ -1171,12 +1176,14 @@ onMounted(() => {
             </div>
             <div v-else-if="n.IsActive && n.Updates?.error" class="node-meta waf-miss" :title="n.Updates.error">更新資訊取得失敗</div>
           </div>
-          <el-switch :model-value="n.IsActive" size="small" @change="(v) => toggleNode(n, v)" />
-          <el-button size="small" :icon="RefreshRight" circle text :loading="rebooting[n.Id]" :disabled="!n.IsActive"
-                     :title="nodeUpd(n)?.rebootRequired ? '重開機（有更新需要重開機才生效）' : '重開機'" :class="{ 'reboot-hot': nodeUpd(n)?.rebootRequired }"
-                     @click="rebootNode(n)" />
-          <el-button size="small" :icon="Document" circle text title="檢視 Nginx Log" @click="openNodeLog(n)" />
-          <el-button size="small" :icon="Edit" circle text title="編輯節點" @click="openNode(n)" />
+          <el-switch :model-value="n.IsActive" size="small" title="啟用 / 停用節點" @change="(v) => toggleNode(n, v)" />
+        </div>
+        <div class="node-actions">
+          <el-button size="small" :icon="RefreshRight" text :loading="rebooting[n.Id]" :disabled="!n.IsActive"
+                     :title="nodeUpd(n)?.rebootRequired ? '有更新需要重開機才生效' : '遠端重開機此節點'" :class="{ 'reboot-hot': nodeUpd(n)?.rebootRequired }"
+                     @click="rebootNode(n)">重開機</el-button>
+          <el-button size="small" :icon="Document" text title="檢視 Nginx Log" @click="openNodeLog(n)">Log</el-button>
+          <el-button size="small" :icon="Edit" text title="編輯節點" @click="openNode(n)">編輯</el-button>
         </div>
         <template v-if="n.IsActive && n.Stats">
           <div v-if="n.Stats.error" class="res-err">{{ n.Stats.error }}</div>
@@ -1210,7 +1217,7 @@ onMounted(() => {
                      @click="ruleSelection.length ? runCutoverCheck(ruleSelection) : ElMessage.info('請先勾選表格左側要檢查的規則（可多選，一次最多 50 筆）；單筆也可按該列「操作」欄的準心圖示')">
             切換前檢查{{ ruleSelection.length ? `（${ruleSelection.length}）` : '' }}
           </el-button>
-          <span class="hint">修改後需按右上角「一鍵同步部署」才會推送到 Nginx 節點。</span>
+          <span class="hint">修改後需按節點卡片上方的「一鍵同步部署」才會推送到 Nginx 節點。</span>
         </div>
         <div class="toolbar search-bar">
           <el-input v-model="ruleQuery" :prefix-icon="Search" clearable placeholder="搜尋網域、後端 IP 或申請人" class="search" />
@@ -2242,6 +2249,10 @@ onMounted(() => {
 .node-tools { display: flex; align-items: center; gap: 12px; flex: none; }
 .node-tools .el-button + .el-button { margin-left: 0; }
 .node-row { display: flex; align-items: center; gap: 12px; }
+.node-actions { display: flex; justify-content: flex-end; gap: 4px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--el-border-color-lighter); }
+.node-actions .el-button + .el-button { margin-left: 0; }
+.deploy-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+.deploy-bar .hint { color: #999; font-size: 12px; }
 .node-info { flex: 1; min-width: 0; }
 .node-name { font-weight: 600; }
 .node-meta { color: #7b8794; font-size: 12px; line-height: 1.6; }
