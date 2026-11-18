@@ -93,7 +93,14 @@ async function verify(account, password) {
   if (!data || typeof data !== 'object') {
     throw new AuthServiceError(`認證服務回應不是有效的 JSON（HTTP ${status}）`, 'BAD_RESPONSE');
   }
-  if (data.Ok === true) return { ok: true, displayName: String(data.DisplayName || '').trim() };
+  if (data.Ok === true) {
+    // 帳密驗證回應本身帶的姓名 / 單位（欄位名稱相容幾種寫法）；記錄回應欄位名稱（不含值）以利對照
+    console.log(`[auth] 認證回應欄位：${Object.keys(data).join(', ')}`);
+    const pick = (...keys) => keys.map((k) => data[k] ?? data.Data?.[k] ?? data.User?.[k]).find((v) => v !== undefined && v !== null && v !== '');
+    const dep = pick('Department', 'Departments', 'Dept', 'DeptName', 'Unit', 'UnitName');
+    const departments = (Array.isArray(dep) ? dep : [dep]).map((s) => String(s ?? '').trim()).filter(Boolean);
+    return { ok: true, displayName: String(pick('DisplayName', 'Name') || '').trim(), departments };
+  }
   if (data.Code === 'INVALID_CREDENTIALS') return { ok: false, displayName: '' };
   const d = describe(status, data);
   throw new AuthServiceError(d.message, d.code);

@@ -116,10 +116,11 @@ router.post('/login', async (req, res) => {
   // 不在白名單者不送認證服務，但回應訊息與帳密錯誤相同，避免帳號列舉
   let ok = false;
   let displayName = '';
+  let authDepts = [];
   const source = await accounts.loginSource(username);
   if (source) {
     try {
-      ({ ok, displayName } = await portalAuth.verify(username, password));
+      ({ ok, displayName, departments: authDepts = [] } = await portalAuth.verify(username, password));
     } catch (e) {
       console.error(`[auth] 認證服務錯誤（${e.code || 'ERROR'}）：${e.message}`);
       await audit.record(req, { action: 'LOGIN_FAILED', targetType: 'AUTH', username, success: false, detail: { reason: '認證服務錯誤', code: e.code } });
@@ -141,13 +142,14 @@ router.post('/login', async (req, res) => {
   // 姓名與單位：查無資料或查詢失敗不影響登入，退回使用 DisplayName
   const profile = await portalAuth.getUserData(username);
   const name = (profile?.name || displayName || '').slice(0, 100);
-  const departments = (profile?.departments || []).slice(0, 10).map((d) => d.slice(0, 100));
+  const departments = (profile?.departments?.length ? profile.departments : authDepts).slice(0, 10).map((d) => d.slice(0, 100));
   const token = jwt.sign({ sub: username, name, dept: departments }, config.auth.jwtSecret, {
     expiresIn: config.auth.jwtExpiresIn, issuer: ISSUER, algorithm: 'HS256',
   });
   console.log(`[auth] 登入成功：${username} @ ${req.ip}`);
   // 帳號管理的「姓名 / 單位」以認證 API 查到的資料自動更新（查無資料時保留原值）
-  await accounts.touchLogin(username, profile ? accounts.profileText(profile.name, departments) : null);
+  // 優先用 userDataConnect，查不到時用帳密驗證回應帶的姓名 / 單位
+  await accounts.touchLogin(username, accounts.profileText(name, departments));
   await audit.record(req, { action: 'LOGIN', targetType: 'AUTH', username, detail: { source: source === 'env' ? '.env 特權帳號' : '帳號管理', name: name || undefined } });
   return res.json({ token, username, name, departments, expiresIn: config.auth.jwtExpiresIn });
 });
