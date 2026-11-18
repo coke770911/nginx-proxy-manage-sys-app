@@ -37,7 +37,8 @@ const DomainRule = sequelize.define('DomainRule', {
   Id: pk(),
   DomainName: { type: DataTypes.STRING(253), allowNull: false },
   DomainAliases: { type: DataTypes.TEXT }, // 網域別名，一行一個（v1.0.20 起）
-  Custom404: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false }, // 後端回 404 時改顯示系統頁面（v1.0.20 起）
+  Custom404: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false }, // 舊欄位（v1.0.20）：與 InterceptCodes 是否含 404 同步
+  InterceptCodes: { type: DataTypes.STRING(100) }, // 後端回這些狀態碼時改顯示系統頁面，逗號分隔（v1.1.1 起）
   TargetIp: { type: DataTypes.STRING(255), allowNull: false },
   TargetPort: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 80 },
   CertificateId: { type: DataTypes.INTEGER, allowNull: false },

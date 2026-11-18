@@ -158,6 +158,16 @@ IF COL_LENGTH(N'dbo.DomainRules', N'Custom404') IS NULL
     ALTER TABLE dbo.DomainRules ADD Custom404 BIT NOT NULL CONSTRAINT DF_DomainRules_Custom404 DEFAULT (0);
 GO
 
+/* ---- 攔截後端錯誤狀態碼（v1.1.1 起，取代只能攔 404 的 Custom404）
+        InterceptCodes：逗號分隔，例 '404,500'；可用 400 403 404 405 408 410 429 500 501 503，NULL = 不攔截
+        既有 Custom404 = 1 的規則轉成 '404'；Custom404 保留並與「是否含 404」同步 ---- */
+IF COL_LENGTH(N'dbo.DomainRules', N'InterceptCodes') IS NULL
+BEGIN
+    ALTER TABLE dbo.DomainRules ADD InterceptCodes NVARCHAR(100) NULL;
+    EXEC (N'UPDATE dbo.DomainRules SET InterceptCodes = N''404'' WHERE Custom404 = 1 AND InterceptCodes IS NULL;');
+END
+GO
+
 /* ---------------------------------------------------------------------------
    3a-2. IpAccessSettings — 全域 IP 黑名單（只有 Id = 1 一筆）
          BlockList：一行一筆 IP / CIDR，「#」後為備註；所有網域一律拒絕，空白 = 不啟用

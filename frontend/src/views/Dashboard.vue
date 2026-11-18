@@ -153,7 +153,7 @@ async function loadAudit(resetPage = false) {
 
 const FIELD_LABEL = {
   DomainName: '來源網域', DomainAliases: '網域別名', TargetIp: '後端 IP', TargetPort: '後端 Port', CertificateId: '憑證 ID', ForceHttps: '強制 HTTPS',
-  EnableWebSocket: 'WebSocket', Custom404: '後端 404 改顯示系統頁', ClientMaxBodySize: '上傳上限', IsActive: '啟用', IsMaintenance: '維護中頁面',
+  EnableWebSocket: 'WebSocket', Custom404: '後端 404 改顯示系統頁', InterceptCodes: '攔截後端錯誤', ClientMaxBodySize: '上傳上限', IsActive: '啟用', IsMaintenance: '維護中頁面',
   CustomNginxSnippet: '自訂 Nginx 語法', Remark: '備註', NodeName: '節點名稱', IpAddress: 'IP', SshPort: 'SSH Port',
   SshUser: 'SSH 帳號', SshKeyPath: '私鑰路徑', HostKeySha256: '主機指紋', Alias: '別名', SanDomains: '涵蓋網域',
   Issuer: '發行商', Fingerprint: '憑證指紋', ValidTo: '到期日', Username: '帳號', DisplayName: '姓名 / 單位',
@@ -500,7 +500,7 @@ async function removeNode(row) {
 const blankUpstream = () => ({ Host: '', Port: 80, Weight: 1, IsBackup: false, IsActive: true });
 const blankRule = () => ({
   DomainName: '', DomainAliases: '', CertificateId: null,
-  ForceHttps: true, EnableWebSocket: false, Custom404: false, ClientMaxBodySize: '2M',
+  ForceHttps: true, EnableWebSocket: false, InterceptList: [], ClientMaxBodySize: '2M',
   IsActive: true, IsMaintenance: false, CustomNginxSnippet: '', Remark: '',
   LbMethod: 'round_robin', LbCookieName: '', Upstreams: [blankUpstream()],
   WafMode: 'off', WafExcludeIds: '', IpAccessMode: 'off', IpAccessList: '',
@@ -510,6 +510,14 @@ const LB_METHOD = {
   least_conn: { text: '最少連線', hint: '優先送給目前連線數最少的主機，適合處理時間長短差異大的系統' },
   cookie: { text: '依 Cookie 固定', hint: '同一個 Cookie 值固定送到同一台，適合登入狀態存在單台記憶體的舊系統；不可搭配備援機' },
 };
+/* 攔截後端錯誤狀態碼（與後端 nginxTemplate INTERCEPT_CODES 相同）；舊資料沒有 InterceptCodes 時以 Custom404 視為只攔 404 */
+const INTERCEPT_OPTIONS = [
+  ['400', '請求格式有誤'], ['403', '沒有權限'], ['404', '找不到網頁'], ['405', '不支援的操作'], ['408', '請求逾時'],
+  ['410', '網頁已移除'], ['429', '請求太頻繁'], ['500', '伺服器錯誤'], ['501', '不支援的功能'], ['503', '服務暫停'],
+];
+const interceptList = (r) => (r.InterceptCodes == null
+  ? (r.Custom404 ? ['404'] : [])
+  : String(r.InterceptCodes).split(',').map((s) => s.trim()).filter(Boolean));
 const ruleUpstreams = (r) => (r.Upstreams && r.Upstreams.length ? r.Upstreams : [{ Host: r.TargetIp, Port: r.TargetPort, Weight: 1, IsBackup: false, IsActive: true }]);
 const HOST_PATTERN = /^[A-Za-z0-9]([A-Za-z0-9.-]{0,253}[A-Za-z0-9])?$/;
 function validateUpstreams(_rule, _v, cb) {
@@ -543,7 +551,7 @@ const ruleRules = {
 function openRule(row) {
   ruleDlg.id = row ? row.Id : null;
   ruleDlg.form = row
-    ? { ...blankRule(), ...row, certificate: undefined, DomainAliases: row.DomainAliases || '', LbCookieName: row.LbCookieName || '', WafMode: row.WafMode || 'off', WafExcludeIds: row.WafExcludeIds || '', IpAccessMode: row.IpAccessMode || 'off', IpAccessList: row.IpAccessList || '', Upstreams: ruleUpstreams(row).map(({ Host, Port, Weight, IsBackup, IsActive }) => ({ Host, Port, Weight, IsBackup, IsActive })) }
+    ? { ...blankRule(), ...row, certificate: undefined, DomainAliases: row.DomainAliases || '', LbCookieName: row.LbCookieName || '', WafMode: row.WafMode || 'off', WafExcludeIds: row.WafExcludeIds || '', IpAccessMode: row.IpAccessMode || 'off', IpAccessList: row.IpAccessList || '', InterceptList: interceptList(row), Upstreams: ruleUpstreams(row).map(({ Host, Port, Weight, IsBackup, IsActive }) => ({ Host, Port, Weight, IsBackup, IsActive })) }
     : blankRule();
   ruleDlg.visible = true;
 }
@@ -553,7 +561,8 @@ async function saveRule() {
   ruleDlg.saving = true;
   try {
     const body = { ...ruleDlg.form, Upstreams: ruleDlg.form.Upstreams.map((u) => ({ ...u, Host: String(u.Host).trim() })) };
-    ['certificate', 'TargetIp', 'TargetPort', 'Id', 'CreatedAt', 'UpdatedAt'].forEach((k) => delete body[k]);
+    body.InterceptCodes = INTERCEPT_OPTIONS.map(([c]) => c).filter((c) => ruleDlg.form.InterceptList.includes(c)).join(',');
+    ['certificate', 'TargetIp', 'TargetPort', 'Id', 'CreatedAt', 'UpdatedAt', 'InterceptList', 'Custom404'].forEach((k) => delete body[k]);
     if (ruleDlg.id) await api.put(`/rules/${ruleDlg.id}`, body);
     else await api.post('/rules', body);
     ElMessage.success('已儲存（需按「一鍵同步部署」才會生效）');
@@ -1728,8 +1737,16 @@ onMounted(() => {
           <el-checkbox v-model="ruleDlg.form.EnableWebSocket">支援 WebSocket</el-checkbox>
           <el-checkbox v-model="ruleDlg.form.IsActive">啟用</el-checkbox>
           <el-checkbox v-model="ruleDlg.form.IsMaintenance">系統維護中頁面</el-checkbox>
-          <el-checkbox v-model="ruleDlg.form.Custom404">後端 404 改顯示系統頁面</el-checkbox>
-          <div v-if="ruleDlg.form.Custom404" class="hint">後端回 404 時改顯示系統的 404 頁（後端自己回的 502 / 504 也會改用系統頁）。後端若是 API 或有自己設計的 404 頁，請勿開啟。</div>
+        </el-form-item>
+        <el-form-item label="攔截後端錯誤">
+          <el-checkbox-group v-model="ruleDlg.form.InterceptList">
+            <el-checkbox v-for="[c, t] in INTERCEPT_OPTIONS" :key="c" :value="c">{{ c }} {{ t }}</el-checkbox>
+          </el-checkbox-group>
+          <div class="form-hint">
+            後端回勾選的狀態碼時，改顯示系統的柴犬錯誤頁（狀態碼不變）；有勾選任一項時，後端自己回的 502 / 504 也會改用系統頁。
+            後端若是 API（回 JSON 錯誤）或有自己設計的錯誤頁，請勿勾選；429 / 503 會蓋掉後端的 Retry-After 說明。
+            <template v-if="ruleDlg.form.InterceptList.includes('403') && ruleDlg.form.WafMode === 'block'">WAF 擋下的 403 仍顯示 WAF 攔截頁。</template>
+          </div>
         </el-form-item>
         <el-form-item label="上傳檔案上限"><el-input v-model="ruleDlg.form.ClientMaxBodySize" placeholder="2M" style="width: 160px" /></el-form-item>
         <el-form-item label="WAF 防護">

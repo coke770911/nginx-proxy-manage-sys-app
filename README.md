@@ -386,7 +386,20 @@ Nginx 部署時只檢查設定語法（`nginx -t`），**不會**檢查後端是
 
 - **502 Bad Gateway**：連不上後端（拒絕連線、主機不通）。**504 Gateway Timeout**：後端逾時沒有回應。狀態碼維持不變，F5 與監控工具仍能正確判斷。
 - 預設只攔 Nginx 自己產生的錯誤；後端程式自己回的 404 / 500 等頁面照常顯示（未開啟 `proxy_intercept_errors`）。
-- **後端 404 改顯示系統頁面**（規則編輯視窗「功能開關」，預設關閉）：開啟後該網域加上 `proxy_intercept_errors on;` 與 `error_page 404 @backend_404;`，後端回 404 時改顯示柴犬 404 頁（狀態碼仍為 404）；同時後端自己回的 502 / 504 也會改用系統頁。後端若是 API（回 JSON 錯誤）或有自己設計的 404 頁，請勿開啟。資料庫欄位 `DomainRules.Custom404`（v1.0.20 起，執行 `database/schema.sql` 補上）。
+- **攔截後端錯誤**（規則編輯視窗，預設都不勾；取代 v1.0.20 的「後端 404 改顯示系統頁面」開關）：可勾選 400、403、404、405、408、410、429、500、501、503。有勾選時該網域加上 `proxy_intercept_errors on;` 與對應的 `error_page <碼> @backend_<碼>;`，後端回這些狀態碼改顯示柴犬錯誤頁（狀態碼不變）；同時後端自己回的 502 / 504 也會改用系統頁，沒勾選的狀態碼照常顯示後端自己的頁面。
+  - 不開放 401（會蓋掉 `WWW-Authenticate`，瀏覽器登入視窗失效）；429 / 503 會蓋掉後端的 `Retry-After` 說明。後端若是 API（回 JSON 錯誤）或有自己設計的錯誤頁，請勿勾選。
+  - 資料庫欄位 `DomainRules.InterceptCodes`（逗號分隔，v1.1.1 起，執行 `database/schema.sql` 補上；既有 `Custom404 = 1` 的規則會自動轉成 `404`）。`Custom404` 保留並與「是否含 404」同步。
+  - 開啟 WAF 時，錯誤頁的 named location 一律加上 `modsecurity off;`，避免內部轉址後被 WAF 重複檢查。
+
+## WAF 攔截頁（403）
+
+規則的 WAF 為「阻擋」模式時，被 WAF 擋下的請求不再顯示 Nginx 白底的「403 Forbidden」，改顯示柴犬攔截頁：
+
+- 頁面顯示**事件編號**（`$request_id`）、發生時間（`$time_iso8601`）與使用者 IP，請使用者回報給管理者。
+- 每個開啟 WAF 的網域都加上 `modsecurity_transaction_id "$request_id";`，WAF Log 裡的 `[unique_id "..."]` 與攔截頁的事件編號相同；到「節點 Log → WAF」以事件編號當關鍵字搜尋，就能找到命中的規則 ID，判斷是否誤判後加入「排除規則 ID」。
+- 設定方式：server 層與 `location /` 都寫 `error_page 403 @waf_blocked;`（`location /` 有自己的 error_page，不會繼承 server 層）。
+- 若同時勾選「攔截後端錯誤 403」：`@waf_blocked` 以 `$upstream_status` 判斷，有值代表是後端自己回的 403，改顯示一般 403 頁；空值才是 WAF 擋下。
+- 「僅偵測」模式不會擋請求，也就不會出現攔截頁；`modsecurity_transaction_id` 仍會設定，Log 一樣可用編號搜尋。
 - 多台後端時，會先依負載平衡自動改送其他台，全部失敗才出現此頁。
 - 維護中的規則不轉發後端，仍顯示 503 維護頁面。
 

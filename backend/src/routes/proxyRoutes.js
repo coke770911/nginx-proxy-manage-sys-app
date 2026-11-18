@@ -6,7 +6,7 @@ const { Op } = require('sequelize');
 const { sequelize, ProxyNode, SslCertificate, DomainRule, RuleUpstream, DeployLog, AuditLog } = require('../models');
 const audit = require('../services/auditService');
 const certService = require('../services/certService');
-const { validateRule, renderConf, upstreamsOf, parseAliases, domainsOf } = require('../services/nginxTemplate');
+const { validateRule, renderConf, upstreamsOf, parseAliases, domainsOf, normalizeInterceptCodes } = require('../services/nginxTemplate');
 const deployService = require('../services/deployService');
 const healthService = require('../services/healthService');
 const { fetchHostFingerprint } = require('../services/sshSession');
@@ -203,7 +203,7 @@ router.delete('/certificates/:id', wrap(async (req, res) => {
 
 /* =============================================================== 網域規則 DomainRules */
 const RULE_FIELDS = [
-  'DomainName', 'DomainAliases', 'CertificateId', 'ForceHttps', 'EnableWebSocket', 'Custom404',
+  'DomainName', 'DomainAliases', 'CertificateId', 'ForceHttps', 'EnableWebSocket', 'Custom404', 'InterceptCodes',
   'ClientMaxBodySize', 'IsActive', 'IsMaintenance', 'CustomNginxSnippet', 'Remark', 'LbMethod', 'LbCookieName',
   'WafMode', 'WafExcludeIds', 'IpAccessMode', 'IpAccessList',
 ];
@@ -247,6 +247,11 @@ function normalizeRule(data) {
   if ('DomainName' in out) out.DomainName = String(out.DomainName).trim().toLowerCase();
   // 別名整理成一行一個（小寫、去重複）；空白 = 沒有別名
   if ('DomainAliases' in out) out.DomainAliases = parseAliases(out.DomainAliases).join('\n') || null;
+  // 攔截狀態碼整理成 '404,500'；Custom404 為舊欄位，跟著是否含 404 同步（格式由 validateRule 白名單檢查）
+  if ('InterceptCodes' in out) {
+    out.InterceptCodes = normalizeInterceptCodes(out.InterceptCodes);
+    out.Custom404 = String(out.InterceptCodes || '').split(',').includes('404');
+  }
   if ('ClientMaxBodySize' in out) out.ClientMaxBodySize = String(out.ClientMaxBodySize).trim();
   if ('LbMethod' in out) out.LbMethod = String(out.LbMethod || 'round_robin').trim();
   if ('LbCookieName' in out) out.LbCookieName = String(out.LbCookieName || '').trim() || null;

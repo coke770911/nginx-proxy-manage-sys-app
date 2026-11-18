@@ -169,6 +169,8 @@ function serverWafLines(rule, settings) {
     `    error_log ${config.ssh.logDir}/${WAF_LOG_NAME} info;`,
     `    error_log ${config.ssh.logDir}/${wafDomainLogName(rule.DomainName)} info;`,
     '    modsecurity on;',
+    // 事件編號：以 nginx 的 $request_id 當 ModSecurity 交易編號，WAF Log 的 [unique_id] 與攔截頁顯示的編號一致
+    '    modsecurity_transaction_id "$request_id";',
     `    modsecurity_rules '${body.join('\n        ')}';`,
   ];
 }

@@ -36,6 +36,21 @@ function parseAliases(text) {
   });
 }
 const aliasesOf = (r) => parseAliases(r.DomainAliases);
+
+/**
+ * 攔截後端錯誤：InterceptCodes 為逗號分隔的狀態碼（例：404,500），只接受 INTERCEPT_CODES 白名單。
+ * 不開放 401（會蓋掉 WWW-Authenticate 造成登入視窗失效）與 502 / 504（只要有攔截就一律改用系統頁）。
+ * 舊資料（v1.1.0 以前）沒有 InterceptCodes 時，以 Custom404 = 1 視為只攔 404。
+ */
+const INTERCEPT_CODES = ['400', '403', '404', '405', '408', '410', '429', '500', '501', '503'];
+const parseInterceptCodes = (v) => [...new Set(String(v || '').split(/[\s,;，、]+/).filter(Boolean))]
+  .sort((a, b) => Number(a) - Number(b));
+function interceptCodesOf(r) {
+  if (r.InterceptCodes === null || r.InterceptCodes === undefined) return r.Custom404 ? ['404'] : [];
+  return parseInterceptCodes(r.InterceptCodes).filter((c) => INTERCEPT_CODES.includes(c));
+}
+/** 存入資料庫前的正規化：' 500, 404' → '404,500'；空白 → null */
+const normalizeInterceptCodes = (v) => parseInterceptCodes(v).join(',') || null;
 /** 主網域 + 所有別名（小寫） */
 const domainsOf = (r) => [String(r.DomainName || '').toLowerCase(), ...aliasesOf(r)].filter(Boolean);
 
@@ -84,6 +99,8 @@ function validateRule(r) {
   if (method === 'cookie' && active.some((u) => u.IsBackup)) errs.push('「依 Cookie 固定」不能搭配備援機（nginx hash 不支援 backup）');
   if (!r.CertificateId) errs.push('必須綁定 SSL 憑證');
   if (!SIZE_RE.test(String(r.ClientMaxBodySize || ''))) errs.push('上傳檔案上限格式不正確（例：50M、1G、0 代表不限制）');
+  const badCodes = parseInterceptCodes(r.InterceptCodes).filter((c) => !INTERCEPT_CODES.includes(c));
+  if (badCodes.length) errs.push(`攔截狀態碼只能是 ${INTERCEPT_CODES.join('、')}（不支援：${badCodes.slice(0, 5).join('、')}）`);
   errs.push(...waf.validateRuleWaf(r));
   errs.push(...ipAccess.validateRuleIp(r));
   const snippet = r.CustomNginxSnippet || '';
@@ -286,8 +303,47 @@ const backendDownHtml = (domain, code) => shibaPage({
   en: 'The service is temporarily unavailable. Please try again later.',
 });
 
-/** 403：來源 IP 被 IP 存取控制拒絕；IP_MARK 會在 returnHtml 換成 $remote_addr（真實來源 IP） */
+/** 後端回其他錯誤碼且規則勾選攔截時的頁面文字（404 用上面的 backendNotFoundHtml） */
+const BACKEND_ERROR_TEXT = {
+  400: ['請求格式有誤', '柴犬看了半天，看不懂這個請求的內容…', 'Bad Request', '網站無法處理這個請求，請重新整理頁面或回到首頁再試一次。', 'The server could not understand the request.'],
+  403: ['沒有存取權限', '柴犬拿著放大鏡核對了一下，這個頁面目前不開放…', 'Forbidden', '您沒有權限瀏覽這個頁面；若您認為這是錯誤，請聯絡網站管理者。', 'You do not have permission to access this page.'],
+  405: ['不支援這個操作', '柴犬歪著頭，這個網頁不接受這種操作方式…', 'Method Not Allowed', '請回到上一頁重新操作，或從網站首頁進入。', 'The request method is not allowed for this page.'],
+  408: ['請求逾時', '柴犬等了好久，請求一直沒有送完…', 'Request Timeout', '網路連線可能不穩定，請重新整理頁面再試一次。', 'The request timed out. Please try again.'],
+  410: ['網頁已經移除', '柴犬找到了位置，但這個網頁已經搬走了…', 'Gone', '這個網頁已永久移除，請回到網站首頁尋找相關內容。', 'The page you requested is no longer available.'],
+  429: ['請求太頻繁', '柴犬喘口氣，您的操作速度有點快…', 'Too Many Requests', '請稍等一下再重新整理頁面。', 'Too many requests. Please slow down and try again later.'],
+  500: ['網站發生錯誤', '柴犬拿著放大鏡檢查，網站程式出了點狀況…', 'Internal Server Error', '網站暫時無法完成這個請求，請稍後再試；若持續發生，請聯絡網站管理者。', 'The server encountered an internal error. Please try again later.'],
+  501: ['不支援的功能', '柴犬翻遍了說明書，網站目前沒有這個功能…', 'Not Implemented', '網站不支援這個請求，請回到上一頁重新操作。', 'The server does not support this request.'],
+  503: ['服務暫停中', '柴犬看了一下，網站服務暫時休息中…', 'Service Unavailable', '網站服務暫時無法使用，請稍後再試。', 'The service is temporarily unavailable. Please try again later.'],
+};
+const backendErrorHtml = (domain, code) => {
+  if (code === '404') return backendNotFoundHtml(domain);
+  const [title, sub, name, msg, en] = BACKEND_ERROR_TEXT[code];
+  return shibaPage({ code, domain, title, sub, codeText: `HTTP ${code} · ${name}`, msg, en });
+};
+
+/**
+ * 頁面中的動態欄位：returnHtml 會把下列記號換成 nginx 變數（變數值只會是 IP、十六進位或時間字元，不會再被解析）
+ * IP_MARK → $remote_addr（真實來源 IP）、REQ_MARK → $request_id（WAF 事件編號）、TIME_MARK → $time_iso8601
+ */
 const IP_MARK = '@@CLIENT_IP@@';
+const REQ_MARK = '@@REQ_ID@@';
+const TIME_MARK = '@@TIME@@';
+const MARK_VARS = { [IP_MARK]: '$remote_addr', [REQ_MARK]: '$request_id', [TIME_MARK]: '$time_iso8601' };
+const MARK_RE = /(@@CLIENT_IP@@|@@REQ_ID@@|@@TIME@@)/;
+
+/**
+ * 403：WAF（阻擋模式）擋下請求。事件編號 = $request_id，同時設為 modsecurity_transaction_id，
+ * 會出現在 WAF Log 的 [unique_id "..."]，管理者可在「節點 Log → WAF」以事件編號搜尋。
+ */
+const wafBlockedHtml = (domain) => shibaPage({
+  code: '403', domain, title: '請求已被安全防護攔截',
+  sub: '柴犬警衛發現這個請求看起來有風險，先幫網站擋下來了…',
+  codeText: `HTTP 403 · 事件編號：${REQ_MARK}`,
+  msg: `若您是正常操作，請將上方事件編號、發生時間（${TIME_MARK}）與您的 IP（${IP_MARK}）提供給網站管理者協助排除。`,
+  en: 'Your request was blocked by the web application firewall.',
+});
+
+/** 403：來源 IP 被 IP 存取控制拒絕 */
 const ipDeniedHtml = (domain) => shibaPage({
   code: '403', domain, title: '無法存取這個網站',
   sub: '柴犬拿著放大鏡核對了來源位址，這個位址目前沒有存取權限…',
@@ -314,17 +370,35 @@ function chunkText(safe) {
   return chunks;
 }
 function returnHtml(code, html) {
-  // HTML 中的 IP_MARK 換成 nginx 變數 $remote_addr（只會是 IP 字元）；其餘內容維持單引號字串、不被 nginx 解析
-  const parts = html.split(IP_MARK).map((p) => chunkText(safeNginxString(p)));
-  if (parts.length === 1 && parts[0].length === 1) return [`return ${code} '${parts[0][0]}';`];
+  // HTML 中的記號換成 nginx 變數（見 MARK_VARS）；其餘內容維持單引號字串、不被 nginx 解析
+  const pieces = html.split(MARK_RE); // 奇數索引為記號
+  if (pieces.length === 1) {
+    const chunks = chunkText(safeNginxString(html));
+    if (chunks.length === 1) return [`return ${code} '${chunks[0]}';`];
+  }
   const sets = [];
   const refs = [];
   let n = 0;
-  parts.forEach((chunks, pi) => {
-    if (pi > 0) refs.push('$remote_addr');
-    chunks.forEach((c) => { sets.push(`set $page_part${n} '${c}';`); refs.push(`$page_part${n}`); n += 1; });
+  pieces.forEach((p, i) => {
+    if (i % 2) { refs.push(MARK_VARS[p]); return; }
+    if (!p) return;
+    chunkText(safeNginxString(p)).forEach((c) => { sets.push(`set $page_part${n} '${c}';`); refs.push(`$page_part${n}`); n += 1; });
   });
   return [...sets, `return ${code} "${refs.join('')}";`];
+}
+
+/** 錯誤頁 named location；開啟 WAF 時內部轉址會重新檢查一次，必須關掉 modsecurity 避免重複處理 */
+function errorLocation(name, code, html, wafOn, extra = []) {
+  return [
+    `location ${name} {`,
+    ...(wafOn ? ['    modsecurity off;'] : []),
+    '    default_type text/html;',
+    '    charset utf-8;',
+    '    add_header Cache-Control "no-store" always;',
+    ...extra,
+    ...returnHtml(code, html).map((l) => `    ${l}`),
+    '}',
+  ];
 }
 
 /** 放進 nginx 單引號字串前的最後防線：不可含 ' $ \ 或換行 */
@@ -376,7 +450,7 @@ function renderConf(rule, opts = {}) {
   const serverNames = domainsOf(rule).join(' ');
   const aliases = aliasesOf(rule);
   const ws = !!rule.EnableWebSocket;
-  const custom404 = !!rule.Custom404;
+  const intercept = interceptCodesOf(rule);
   const members = activeUpstreams(rule);
   const multi = members.length > 1;
   const upName = rule.Id ? `rule${Number(rule.Id)}_backend` : 'rule_preview_backend';
@@ -395,6 +469,11 @@ function renderConf(rule, opts = {}) {
   const connVar = `$conn_upgrade_r${rule.Id || 0}`;
   const wafLines = waf.serverWafLines(rule, opts.waf);
   const wafOn = wafLines.length > 0;
+  // 阻擋模式：WAF 擋下的 403 改顯示攔截頁（事件編號 + 時間 + IP）
+  const wafBlock = wafOn && rule.WafMode === 'block';
+  // server 層的 error_page 只會被「沒有自己 error_page 的 location」繼承（例：自訂語法裡的 location），
+  // location / 另外在自己的 error_page 清單再寫一次
+  const wafPageLines = wafBlock ? ['    error_page 403 @waf_blocked;'] : [];
   const ipLines = ipAccess.serverIpLines(rule, !!opts.ipBlock, opts.ipGroups);
   const ipOn = ipLines.length > 0;
   const ipAcl = ipAccess.ruleAcl(rule, opts.ipGroups);
@@ -436,28 +515,24 @@ function renderConf(rule, opts = {}) {
     '    proxy_send_timeout 300s;',
     `    proxy_read_timeout ${ws ? '3600s' : '300s'};`,
     // 預設只攔 Nginx 自己產生的 502 / 504（連不上後端或逾時），後端自己回的錯誤頁不攔。
-    // Custom404 開啟時加上 proxy_intercept_errors：後端回 404 改顯示系統頁（後端自己回的 502 / 504 也會改用系統頁）。
-    ...(custom404 ? ['    proxy_intercept_errors on;', '    error_page 404 @backend_404;'] : []),
+    // 勾選攔截狀態碼時加上 proxy_intercept_errors：後端回這些狀態碼改顯示系統頁（後端自己回的 502 / 504 也會改用系統頁）；
+    // 沒有對應 error_page 的狀態碼仍原樣轉給使用者。
+    ...(intercept.length ? ['    proxy_intercept_errors on;'] : []),
+    ...intercept.filter((c) => !(wafBlock && c === '403')).map((c) => `    error_page ${c} @backend_${c};`),
+    ...wafPageLines,
     '    error_page 502 @backend_502;',
     '    error_page 504 @backend_504;',
     '}',
     '',
-    ...(custom404 ? [
-      'location @backend_404 {',
-      '    default_type text/html;',
-      '    charset utf-8;',
-      '    add_header Cache-Control "no-store" always;',
-      ...returnHtml('404', backendNotFoundHtml(domain)).map((l) => `    ${l}`),
-      '}',
-    ] : []),
-    ...['502', '504'].flatMap((code) => [
-      `location @backend_${code} {`,
-      '    default_type text/html;',
-      '    charset utf-8;',
-      '    add_header Cache-Control "no-store" always;',
-      ...returnHtml(code, backendDownHtml(domain, code)).map((l) => `    ${l}`),
-      '}',
-    ]),
+    ...intercept.filter((c) => !(wafBlock && c === '403'))
+      .flatMap((c) => errorLocation(`@backend_${c}`, c, backendErrorHtml(domain, c), wafOn)),
+    // WAF 擋下時請求沒有送到後端，$upstream_status 為空；若同時勾選攔截 403，後端自己回的 403 改顯示一般 403 頁
+    ...(wafBlock ? errorLocation('@waf_blocked', '403', wafBlockedHtml(domain), wafOn, intercept.includes('403') ? [
+      '    if ($upstream_status) {',
+      ...returnHtml('403', backendErrorHtml(domain, '403')).map((l) => `        ${l}`),
+      '    }',
+    ] : []) : []),
+    ...['502', '504'].flatMap((code) => errorLocation(`@backend_${code}`, code, backendDownHtml(domain, code), wafOn)),
   ].join('\n');
 
   const maintenanceLocation = [
@@ -480,8 +555,8 @@ function renderConf(rule, opts = {}) {
   if (aliases.length) out.push(`# Aliases: ${aliases.join(' ')}`);
   out.push(`# Rule   : #${rule.Id || '-'}  →  ${memberText}${rule.IsMaintenance ? '   [MAINTENANCE MODE]' : ''}`);
   out.push(`# LB     : ${method}${method === 'cookie' ? ` (cookie ${rule.LbCookieName})` : ''}`);
-  if (custom404) out.push('# 404    : 後端 404 改顯示系統頁面');
-  if (wafOn) out.push(`# WAF    : ${waf.WAF_MODE_LABEL[rule.WafMode]}`);
+  if (intercept.length) out.push(`# 攔截   : 後端 ${intercept.join(', ')} 改顯示系統頁面`);
+  if (wafOn) out.push(`# WAF    : ${waf.WAF_MODE_LABEL[rule.WafMode]}${wafBlock ? '（擋下時顯示攔截頁）' : ''}`);
   if (ipOn) out.push(`# IP ACL : ${[opts.ipBlock && '全域黑名單', ipAcl && `${ipAccess.MODE_LABEL[ipAcl.mode]} ${ipAcl.entries.length} 筆`].filter(Boolean).join(' + ')}`);
   out.push(`# Remark :${String(rule.Remark || '').replace(/[\r\n]+/g, ' ')}`);
   out.push('# =====================================================================');
@@ -522,6 +597,7 @@ function renderConf(rule, opts = {}) {
   } else {
     out.push(indent(bodySize));
     wafLines.forEach((l) => out.push(l));
+    wafPageLines.forEach((l) => out.push(l));
     out.push('');
     out.push(indent(trafficLocation));
   }
@@ -551,6 +627,7 @@ function renderConf(rule, opts = {}) {
   out.push('');
   out.push(indent(bodySize));
   wafLines.forEach((l) => out.push(l));
+  wafPageLines.forEach((l) => out.push(l));
   out.push('');
   out.push(indent(healthLocation));
   out.push('');
@@ -641,4 +718,5 @@ function renderDefaultConf(certId) {
   return out.join('\n');
 }
 
-module.exports = { validateRule, renderConf, renderDefaultConf, DEFAULT_CONF_NAME, confFileName, certRemotePaths, upstreamsOf, LB_METHODS, parseAliases, aliasesOf, domainsOf, MAX_ALIASES };
+module.exports = { validateRule, renderConf, renderDefaultConf, DEFAULT_CONF_NAME, confFileName, certRemotePaths, upstreamsOf, LB_METHODS, parseAliases, aliasesOf, domainsOf, MAX_ALIASES,
+  INTERCEPT_CODES, interceptCodesOf, normalizeInterceptCodes };
