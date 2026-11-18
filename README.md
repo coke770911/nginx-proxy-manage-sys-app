@@ -181,7 +181,7 @@ pm2 save          # 記住程序清單，服務重啟後自動還原
 登入成功後，後端再以同一端點呼叫 `userDataConnect`（`{ Action: "userDataConnect", Account }`）取得**姓名與單位**，回傳前端並顯示於右上角（滑鼠移上可看完整單位）；查無資料（`NOT_FOUND`）或查詢失敗不影響登入，改顯示認證回應的 `DisplayName` 或帳號。姓名與單位一併放入 JWT，`GET /api/auth/me` 會回傳 `{ username, name, departments }`。
 
 **帳號管理「姓名 / 單位」自動更新**：格式為「姓名 / 單位1、單位2」（上限 100 字）。
-- 每次登入成功自動更新該帳號的「姓名 / 單位」：優先用 `userDataConnect`，查不到（例如認證服務回 `METHOD_NOT_ALLOWED`）時改用**帳密驗證 REST API 回應本身帶的姓名與單位**（相容 `DisplayName` / `Name`、`Department` / `Dept` / `Unit` 等欄位）；兩者都沒有時保留原內容，不會清空。登入時伺服器 log 會印出認證回應的欄位名稱（不含值）以利對照。
+- 每次登入成功自動更新該帳號的「姓名 / 單位」：優先用 `userDataConnect`，查不到（例如認證服務回 `METHOD_NOT_ALLOWED`）時改用**帳密驗證 REST API 回應本身帶的姓名與單位**（相容 `DisplayName` / `Name`、`Department` / `Dept` / `Unit` 等欄位）；兩者都沒有時保留原內容，不會清空。認證回應的 `DisplayName` 為「單位 單位 姓名職稱」時，會拆成「姓名職稱 / 單位」（例：`王小明職員 / 圖書資訊處 校務系統組`），與欄位標題順序一致。登入時伺服器 log 會印出認證回應的欄位名稱（不含值）以利對照。
 - 新增帳號時「姓名 / 單位」留空，會自動查詢帶入。
 - 帳號管理工具列「同步姓名 / 單位」（需認證服務開放 `userDataConnect`；未開放時只能靠各帳號登入時更新）：逐一查詢所有帳號（含 .env 特權帳號，只需帳號、不需密碼）並更新，結果記入操作紀錄（`POST /api/accounts/sync-profiles`）。
 - .env 特權帳號沒有資料表列，查到的姓名 / 單位只暫存在記憶體，後端重啟後待下次登入或同步再補上。

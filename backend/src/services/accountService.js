@@ -25,8 +25,15 @@ const envProfiles = new Map(); // username -> { DisplayName, LastLoginAt }
 
 /** 組「姓名 / 單位」字串（存入 DisplayName，上限 100 字） */
 function profileText(name, departments) {
-  const n = String(name || '').trim();
-  const d = (departments || []).map((x) => String(x || '').trim()).filter(Boolean).join('、');
+  let n = String(name || '').trim().replace(/\s+/g, ' ');
+  let d = (departments || []).map((x) => String(x || '').trim()).filter(Boolean).join('、');
+  // 認證回應的 DisplayName 為「單位 [單位…] 姓名職稱」（如「圖書資訊處 校務系統組 王小明職員」），
+  // 沒有獨立單位欄位時拆成「姓名職稱 / 單位」，與欄位標題「姓名 / 單位」順序一致
+  if (!d && n.includes(' ')) {
+    const parts = n.split(' ');
+    n = parts.pop();
+    d = parts.join(' ');
+  }
   return [n, d].filter(Boolean).join(' / ').slice(0, 100) || null;
 }
 
