@@ -499,7 +499,7 @@ async function openUpgrade(n) {
     const others = nodes.value.filter((x) => x.IsActive && x.Id !== n.Id).map((x) => x.NodeName).join('、');
     try {
       await ElMessageBox.prompt(
-        `確定要更新節點「${escHtml(n.NodeName)}」的套件？${u ? `（目前可更新 ${escHtml(u.count)} 個）` : ''}<br>`
+        `確定要更新節點「${escHtml(n.NodeName)}」的套件？${u ? `（目前可更新 ${escHtml(u.count)} 個${u.phased?.length ? `；另有 ${u.phased.length} 個分批推送套件尚未輪到本機，不會安裝` : ''}）` : ''}<br>`
           + '將執行 apt-get update + full-upgrade（設定檔衝突時保留現有設定），約需數分鐘；'
           + `更新到 nginx / OpenSSL 時 nginx 會重啟幾秒${others ? `，流量會由 F5 轉給 ${escHtml(others)}` : '，<b style="color:#f56c6c">這是唯一節點，期間網站可能短暫中斷</b>'}。<br>`
           + '更新期間不可部署，也不可同時更新另一台。<br><br>請輸入節點名稱確認：',
@@ -1233,7 +1233,7 @@ onMounted(() => {
                 <div class="upd-pop">
                   <div class="hint">
                     套件清單更新於 {{ fmt(nodeUpd(n).aptUpdatedAt) }}；檢查於 {{ fmt(nodeUpd(n).at) }}。
-                    Ubuntu 的 phased updates 會分批推送，少數套件暫時留著屬正常。更新請用 nginx-node-ops 技能或 SSH 以 sysadmin 執行，兩台輪流。
+                    按下方「更新套件」安裝，兩台請輪流更新。
                   </div>
                   <div v-for="p in nodeUpd(n).packages" :key="p.name" class="upd-pkg">
                     <span class="mono">{{ p.name }}</span>
@@ -1243,6 +1243,21 @@ onMounted(() => {
                 </div>
               </el-popover>
               <el-tag v-else size="small" type="success" :title="`檢查於 ${fmt(nodeUpd(n).at)}`">套件已是最新</el-tag>
+              <el-popover v-if="nodeUpd(n).phased?.length" placement="bottom-start" :width="440" trigger="click">
+                <template #reference>
+                  <el-tag size="small" type="info" class="upd-tag">分批推送 {{ nodeUpd(n).phased.length }} 個</el-tag>
+                </template>
+                <div class="upd-pop">
+                  <div class="hint">
+                    Ubuntu 的 phased updates：新版套件依比例分批推送，尚未輪到本機時 apt 升級會刻意略過，
+                    屬正常現象、不需處理；輪到本機後會自動列入「可更新」。
+                  </div>
+                  <div v-for="p in nodeUpd(n).phased" :key="p.name" class="upd-pkg">
+                    <span class="mono">{{ p.name }}</span>
+                    <span class="upd-ver mono">{{ p.from }} → {{ p.version }}</span>
+                  </div>
+                </div>
+              </el-popover>
               <el-tooltip v-if="nodeUpd(n).rebootRequired" :content="`需要重開機才會生效：${nodeUpd(n).rebootPkgs.join('、') || '（未列出套件）'}`" placement="top">
                 <el-tag size="small" type="danger" effect="dark">需要重開機</el-tag>
               </el-tooltip>

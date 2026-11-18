@@ -74,6 +74,9 @@ const UPDATES_CMD = [
   'echo "RBT:$([ -f /var/run/reboot-required ] && echo 1 || echo 0)|$(sort -u /var/run/reboot-required.pkgs 2>/dev/null | tr \'\\n\' \' \')"',
   'echo "REL:$(grep -m1 -o "New release .* available" /var/lib/ubuntu-release-upgrader/release-upgrade-available 2>/dev/null)"',
   'echo "APTTS:$(stat -c %Y /var/lib/apt/periodic/update-success-stamp 2>/dev/null)"',
+  // 模擬升級（不需 root、不改系統），找出 Ubuntu 分批推送（phased updates）而暫緩的套件：
+  // 這些套件 apt 升級時會故意略過，要等推送比例輪到本機才會裝，不算「待更新」
+  'echo "PHASED:$(LC_ALL=C apt-get -s -o Debug::NoLocking=1 full-upgrade 2>/dev/null | awk \'/deferred due to phasing/{f=1;next} f&&/^  /{printf "%s ",$0;next} {f=0}\')"',
   `apt list --upgradable 2>/dev/null | grep -F 'upgradable from' | head -n ${MAX_PKGS + 1}`,
 ].join('; ');
 
@@ -83,17 +86,22 @@ function parseUpdates(out) {
   const rbt = text.match(/^RBT:([01])\|(.*)$/m);
   const rel = text.match(/^REL:(.*)$/m);
   const ts = text.match(/^APTTS:(\d+)\s*$/m);
-  const packages = [];
+  const ph = text.match(/^PHASED:(.*)$/m);
+  const phasedSet = new Set(ph ? ph[1].trim().split(/\s+/).filter(Boolean).map((n) => n.split(':')[0]) : []);
+  const all = [];
   text.split('\n').forEach((l) => {
     const m = l.match(/^([A-Za-z0-9.+:-]+)\/(\S+)\s+(\S+)\s+\S+\s+\[upgradable from: ([^\]]+)\]/);
-    if (m) packages.push({ name: m[1], suite: m[2], version: m[3], from: m[4], security: /-security/.test(m[2]) });
+    if (m) all.push({ name: m[1], suite: m[2], version: m[3], from: m[4], security: /-security/.test(m[2]), phased: phasedSet.has(m[1]) });
   });
+  const packages = all.filter((p) => !p.phased);
+  const phased = all.filter((p) => p.phased);
   const relText = rel ? rel[1].trim() : '';
   const relVer = relText.match(/New release '([^']+)'/);
   return {
-    count: packages.length > MAX_PKGS ? `${MAX_PKGS}+` : packages.length,
+    count: all.length > MAX_PKGS ? `${MAX_PKGS}+` : packages.length,
     security: packages.filter((p) => p.security).length,
     packages: packages.slice(0, MAX_PKGS),
+    phased: phased.slice(0, MAX_PKGS), // 分批推送暫緩的套件（不計入 count）
     rebootRequired: rbt ? rbt[1] === '1' : false,
     rebootPkgs: rbt ? rbt[2].trim().split(/\s+/).filter(Boolean) : [],
     newRelease: relText ? (relVer ? relVer[1] : relText) : null,

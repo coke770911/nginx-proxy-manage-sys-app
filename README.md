@@ -261,7 +261,8 @@ pm2 save          # 記住程序清單，服務重啟後自動還原
 
 節點卡片顯示該節點待安裝的更新（唯讀檢查，不需 sudo、不連網）：
 
-- **可更新 N 個套件（安全性 M）**：讀節點本機的 `apt list --upgradable`（套件清單由 Ubuntu 的 `apt-daily.timer` 每天自動更新），點標籤可看套件名稱與「目前版本 → 新版本」；有安全性更新時標籤為紅色。少數套件因 Ubuntu phased updates 分批推送暫時留著屬正常。
+- **可更新 N 個套件（安全性 M）**：讀節點本機的 `apt list --upgradable`（套件清單由 Ubuntu 的 `apt-daily.timer` 每天自動更新），點標籤可看套件名稱與「目前版本 → 新版本」；有安全性更新時標籤為紅色。
+- **分批推送 N 個**（灰色）：Ubuntu phased updates 依比例分批推送的套件，尚未輪到本機時 `apt full-upgrade` 會刻意略過，所以「更新套件」後仍會留著，屬正常、不需處理。系統以 `apt-get -s full-upgrade`（模擬，不需 root、不改系統）找出這些套件，**不計入「可更新」數量**；輪到本機後會自動轉為可更新。
 - **需要重開機**：`/var/run/reboot-required` 存在（例如更新了 libc6、核心），滑過可看是哪些套件。
 - **新版 Ubuntu xx**：系統排程偵測到新的 Ubuntu 版本（`/var/lib/ubuntu-release-upgrader/release-upgrade-available`），屬重大升級，請先在測試機驗證。
 - 比較耗時，每台每 30 分鐘檢查一次；按節點區右側「重新檢測」會立即重新取得。
