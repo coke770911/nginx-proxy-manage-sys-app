@@ -146,7 +146,8 @@ router.post('/login', async (req, res) => {
     expiresIn: config.auth.jwtExpiresIn, issuer: ISSUER, algorithm: 'HS256',
   });
   console.log(`[auth] 登入成功：${username} @ ${req.ip}`);
-  if (source === 'db') await accounts.touchLogin(username);
+  // 帳號管理的「姓名 / 單位」以認證 API 查到的資料自動更新（查無資料時保留原值）
+  await accounts.touchLogin(username, profile ? accounts.profileText(profile.name, departments) : null);
   await audit.record(req, { action: 'LOGIN', targetType: 'AUTH', username, detail: { source: source === 'env' ? '.env 特權帳號' : '帳號管理', name: name || undefined } });
   return res.json({ token, username, name, departments, expiresIn: config.auth.jwtExpiresIn });
 });

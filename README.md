@@ -180,6 +180,13 @@ pm2 save          # 記住程序清單，服務重啟後自動還原
 
 登入成功後，後端再以同一端點呼叫 `userDataConnect`（`{ Action: "userDataConnect", Account }`）取得**姓名與單位**，回傳前端並顯示於右上角（滑鼠移上可看完整單位）；查無資料（`NOT_FOUND`）或查詢失敗不影響登入，改顯示認證回應的 `DisplayName` 或帳號。姓名與單位一併放入 JWT，`GET /api/auth/me` 會回傳 `{ username, name, departments }`。
 
+**帳號管理「姓名 / 單位」自動更新**：格式為「姓名 / 單位1、單位2」（上限 100 字）。
+- 每次登入成功，以 `userDataConnect` 查到的資料自動更新該帳號的「姓名 / 單位」；查無資料或查詢失敗時保留原內容，不會清空。
+- 新增帳號時「姓名 / 單位」留空，會自動查詢帶入。
+- 帳號管理工具列「同步姓名 / 單位」：逐一查詢所有帳號（含 .env 特權帳號，只需帳號、不需密碼）並更新，結果記入操作紀錄（`POST /api/accounts/sync-profiles`）。
+- .env 特權帳號沒有資料表列，查到的姓名 / 單位只暫存在記憶體，後端重啟後待下次登入或同步再補上。
+- 認證服務若限制呼叫來源，請在允許的主機（正式機）上操作；不允許時一律保留原值。
+
 登入成功後後端簽發 JWT（HS256，`JWT_SECRET` 簽章，有效時間 `JWT_EXPIRES_IN`），前端存於 `sessionStorage`，之後所有 API 以 `Authorization: Bearer <token>` 驗證；SSE 即時 Log 因 EventSource 無法帶標頭，改以 `?token=` 傳遞。每次請求都會重新比對可登入名單：在「帳號管理」停用或刪除帳號後，該帳號下一次操作即失去權限；從 `ADMIN_ACCOUNTS` 移除則需重啟後端。部署紀錄的「操作者」會記錄登入帳號。
 
 | 設定 | 說明 |

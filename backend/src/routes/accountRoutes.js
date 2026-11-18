@@ -19,12 +19,31 @@ const clean = (b) => {
 
 router.get('/', wrap(async (req, res) => res.json(await accounts.listAll())));
 
+/** 全部帳號（含 .env 特權帳號）以認證 API 重新查詢「姓名 / 單位」；查無資料的帳號保留原值 */
+router.post('/sync-profiles', wrap(async (req, res) => {
+  const list = await accounts.listAll();
+  const names = [...new Set(list.map((a) => a.Username))];
+  const results = [];
+  for (const u of names) results.push(await accounts.syncProfile(u)); // 逐一查詢，避免同時大量呼叫認證服務
+  const changed = results.filter((r) => r.changed);
+  const notFound = results.filter((r) => !r.found).map((r) => r.username);
+  await audit.record(req, {
+    action: 'UPDATE', targetType: 'ACCOUNT', targetName: '同步姓名 / 單位',
+    detail: { total: results.length, changed: changed.map((r) => ({ username: r.username, before: r.before, after: r.after })), notFound },
+  });
+  return res.json({ total: results.length, changed: changed.length, notFound });
+}));
+
 router.post('/', wrap(async (req, res) => {
   const username = accounts.norm(req.body?.Username);
   if (!accounts.USERNAME_RE.test(username)) return fail(res, 400, '帳號格式不正確（英數字開頭，可含 . _ @ -，最長 100 字）');
   if (accounts.isEnvAccount(username)) return fail(res, 409, '此帳號已在 .env 的 ADMIN_ACCOUNTS 中，不需重複新增');
   if (await AdminAccount.findOne({ where: { Username: username } })) return fail(res, 409, '此帳號已存在');
   const data = { IsActive: true, ...clean(req.body || {}), Username: username, CreatedBy: req.user.username };
+  if (!data.DisplayName) { // 未填「姓名 / 單位」時自動以認證 API 查詢帶入
+    const p = await require('../services/portalAuth').getUserData(username);
+    if (p) data.DisplayName = accounts.profileText(p.name, p.departments);
+  }
   const row = await AdminAccount.create(data);
   await audit.record(req, { action: 'CREATE', targetType: 'ACCOUNT', targetId: row.Id, targetName: username, detail: audit.snapshot(data, ['Username', ...FIELDS]) });
   return res.status(201).json(row);

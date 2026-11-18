@@ -198,6 +198,16 @@ async function loadAccounts() {
   try { accounts.value = await api.get('/accounts'); } catch (e) { ElMessage.error(e.message); } finally { accountsLoading.value = false; }
 }
 
+const syncingProfiles = ref(false);
+async function syncProfiles() {
+  syncingProfiles.value = true;
+  try {
+    const r = await api.post('/accounts/sync-profiles');
+    ElMessage.success(`已查詢 ${r.total} 個帳號，更新 ${r.changed} 筆${r.notFound.length ? `；查無資料：${r.notFound.join('、')}` : ''}`);
+    await loadAccounts();
+  } catch (e) { ElMessage.error(e.message); } finally { syncingProfiles.value = false; }
+}
+
 function openAccount(row) {
   Object.assign(accDlg, { visible: true, id: row?.Id || null, saving: false, form: row ? { Username: row.Username, DisplayName: row.DisplayName || '', Remark: row.Remark || '', IsActive: row.IsActive } : blankAccount() });
   nextTick(() => accFormRef.value?.clearValidate());
@@ -1642,6 +1652,7 @@ onMounted(() => {
       <el-tab-pane label="帳號管理" name="accounts">
         <div class="toolbar">
           <el-button type="primary" :icon="Plus" @click="openAccount(null)">新增帳號</el-button>
+          <el-button :icon="Refresh" :loading="syncingProfiles" title="以學校認證 API 重新查詢所有帳號的姓名與單位" @click="syncProfiles">同步姓名 / 單位</el-button>
           <span class="hint">可登入名單 = 下列啟用中的帳號（含 .env 的 ADMIN_ACCOUNTS）；登入時一律以學校 portal 認證 API 驗證密碼，本系統不保存密碼。</span>
         </div>
         <el-table v-loading="accountsLoading" :data="accounts" stripe border style="width: 100%" empty-text="尚無帳號">
@@ -1945,7 +1956,10 @@ onMounted(() => {
         <el-form-item label="帳號" prop="Username">
           <el-input v-model="accDlg.form.Username" :disabled="!!accDlg.id" placeholder="與學校認證相同的帳號" />
         </el-form-item>
-        <el-form-item label="姓名 / 單位"><el-input v-model="accDlg.form.DisplayName" maxlength="100" /></el-form-item>
+        <el-form-item label="姓名 / 單位">
+          <el-input v-model="accDlg.form.DisplayName" maxlength="100" placeholder="留空時自動以學校認證 API 帶入" />
+          <div class="hint">每次登入成功會以認證 API 查到的姓名與單位自動更新（查無資料時保留此處內容）。</div>
+        </el-form-item>
         <el-form-item label="啟用"><el-switch v-model="accDlg.form.IsActive" /></el-form-item>
         <el-form-item label="備註"><el-input v-model="accDlg.form.Remark" type="textarea" :rows="2" maxlength="300" show-word-limit /></el-form-item>
       </el-form>
