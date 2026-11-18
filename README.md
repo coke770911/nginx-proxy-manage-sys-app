@@ -96,6 +96,7 @@
 │        ├─ portalAuth.js       校內 portal 認證 REST API：帳密驗證、姓名 / 單位查詢（userDataConnect）
 │        ├─ captchaService.js   登入圖片驗證碼（四碼數字 PNG，一次性、3 分鐘到期）
 │        ├─ applicant.js        網域名稱申請單欄位（整理與格式驗證）
+│        ├─ nodeOpsService.js   節點遠端重開機、更新套件（背景執行、讀取進度）
 │        ├─ accountService.js   可登入名單（資料庫帳號 + .env 特權帳號）
 │        ├─ auditService.js     系統操作紀錄寫入（不含密碼 / 私鑰）
 │        ├─ certService.js      憑證解析 / 公私鑰比對 / PFX 轉檔
@@ -264,15 +265,27 @@ pm2 save          # 記住程序清單，服務重啟後自動還原
 - **需要重開機**：`/var/run/reboot-required` 存在（例如更新了 libc6、核心），滑過可看是哪些套件。
 - **新版 Ubuntu xx**：系統排程偵測到新的 Ubuntu 版本（`/var/lib/ubuntu-release-upgrader/release-upgrade-available`），屬重大升級，請先在測試機驗證。
 - 比較耗時，每台每 30 分鐘檢查一次；按節點區右側「重新檢測」會立即重新取得。
-- 安裝更新仍由管理者以 sysadmin 執行（`sudo apt update && sudo apt full-upgrade`，或 Claude 技能 nginx-node-ops），兩台輪流。
+- 安裝更新用節點卡片的「更新套件」按鈕（見下節），或由管理者以 sysadmin 手動執行，兩台輪流。
+- **重開機不會安裝套件**，只會讓「已經裝好、需要重開機」的更新（如 libc6、核心）生效；可更新的套件要先「更新套件」。
+
+### 更新套件
+
+節點卡片下方一列有「更新套件」「重開機」「Log」「編輯」四個按鈕（「一鍵同步部署」位於節點卡片上方）。「更新套件」（有安全性更新時顯示紅色）：
+
+- 以 SSH 執行 `NODE_UPGRADE_CMD`（預設 `sudo -n /usr/local/sbin/npm-node-upgrade start`），節點腳本在**背景**執行 `apt-get update` → `apt-get full-upgrade`（非互動、設定檔衝突時保留現有設定、等候 apt 鎖最多 10 分鐘）→ `nginx -t` → 確認 nginx 運作中，並回報是否需要重開機。
+- 輸出寫入節點的 `/var/log/npm-node-upgrade.log`（644），管理介面以 deployer 讀取進度（不需 sudo），視窗每 3 秒更新；**關閉視窗或 SSH 斷線都不影響節點上的更新**，再按一次「更新套件」可看進度或上次的紀錄。
+- 完成後若需要重開機，視窗會出現「重開機此節點」按鈕；同時自動重新檢測節點，更新卡片上的可更新數。
+- **限制**：需輸入節點名稱確認；部署中、其他節點不是 ONLINE、另一台正在更新時都會拒絕；更新期間不可部署、不可重開機該節點（一次只處理一台）。更新到 nginx / OpenSSL 時 nginx 會重啟幾秒，F5 會把流量轉給另一台。
+- **節點需先安裝腳本與授權**：以 sysadmin 在節點執行 `.claude/skills/nginx-node-ops/install-node-upgrade.sh`（`sudo bash install-node-upgrade.sh`，可重複執行），會安裝 `/usr/local/sbin/npm-node-upgrade`（root 擁有、755）並把 sudoers 設為四行：`nginx -t`、`systemctl reload nginx`、`systemctl reboot`、`npm-node-upgrade start`。sudoers 只允許 `start` 這一個參數，deployer 無法執行其他 apt 指令。新節點的 `node-setup.sh` 已包含。
+- 開始與結束（完成 / 失敗、是否需要重開機）都記入操作紀錄（動作「節點更新套件」）。
 
 ### 遠端重開機
 
-節點卡片下方一列有「重開機」「Log」「編輯」三個按鈕（「一鍵同步部署」位於節點卡片上方）。「重開機」（有「需要重開機」時顯示紅色）會以 SSH 執行 `NODE_REBOOT_CMD`（預設 `sudo -n /usr/bin/systemctl reboot`）：
+「重開機」（有「需要重開機」時顯示紅色）會以 SSH 執行 `NODE_REBOOT_CMD`（預設 `sudo -n /usr/bin/systemctl reboot`）：
 
 - **節點需先授權**：在 `/etc/sudoers.d/nginx-deployer` 加一行 `deployer ALL=(root) NOPASSWD: /usr/bin/systemctl reboot`（新節點的 `node-setup.sh` 已包含；既有節點以 sysadmin 執行 `sudo visudo -f /etc/sudoers.d/nginx-deployer` 補上）。未授權時按鈕會回錯誤並提示這行設定。
 - **防誤按**：必須輸入節點名稱確認。
-- **維持服務**：部署進行中、其他啟用中節點不是 ONLINE、同一台 10 分鐘內已重開過時都會拒絕，避免兩台同時離線；重開期間 F5 會把流量轉給另一台。
+- **維持服務**：部署進行中、其他啟用中節點不是 ONLINE、任一台正在更新套件、同一台 10 分鐘內已重開過時都會拒絕，避免兩台同時離線；重開期間 F5 會把流量轉給另一台。
 - 重開機（成功或被拒絕）都記入操作紀錄（動作「節點重開機」）。約 1–3 分鐘後按「重新檢測」確認恢復 ONLINE。
 
 ## 網域規則搜尋
@@ -638,7 +651,7 @@ sudo chmod 750 /etc/nginx/ssl
 # 若 sites-enabled/default 佔用 80，請移除以免 default_server 衝突
 ```
 
-`deployer` 需能寫入上述兩個目錄（本系統不使用 sudo 寫檔），sudoers 僅需 `nginx -t`、`systemctl reload nginx` 與 `systemctl reboot`（管理介面重開機按鈕用，不需要可省略）。主機金鑰指紋可填入 `ProxyNodes.HostKeySha256`（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 的 `SHA256:...`）以防中間人。
+`deployer` 需能寫入上述兩個目錄（本系統不使用 sudo 寫檔），sudoers 僅需 `nginx -t`、`systemctl reload nginx`，以及管理介面按鈕用的 `systemctl reboot` 與 `/usr/local/sbin/npm-node-upgrade start`（不需要可省略）。主機金鑰指紋可填入 `ProxyNodes.HostKeySha256`（`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 的 `SHA256:...`）以防中間人。
 
 ### 節點初始化與安全加固腳本
 

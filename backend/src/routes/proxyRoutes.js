@@ -13,7 +13,7 @@ const { fetchHostFingerprint } = require('../services/sshSession');
 const backendProbe = require('../services/backendProbe');
 const ruleImport = require('../services/ruleImport');
 const applicant = require('../services/applicant');
-const nodeReboot = require('../services/nodeRebootService');
+const nodeOps = require('../services/nodeOpsService');
 const nodeLog = require('../services/nodeLogService');
 const cutoverCheck = require('../services/cutoverCheck');
 const waf = require('../services/wafService');
@@ -103,23 +103,53 @@ router.post('/nodes/check', wrap(async (req, res) => {
 }));
 
 /**
- * 遠端重開機：body.confirmName 必須與節點名稱完全相同（防誤按）；
- * 部署中、其他節點不是 ONLINE、10 分鐘內重開過都會拒絕（見 nodeRebootService）
+ * 節點維運操作（重開機 / 更新套件）：body.confirmName 必須與節點名稱完全相同（防誤按）；
+ * 部署中、其他節點不是 ONLINE、另一台正在更新等情況會拒絕（見 nodeOpsService）。成功或被拒絕都記入操作紀錄。
  */
-router.post('/nodes/:id/reboot', wrap(async (req, res) => {
+async function runNodeOp(req, action, cmd, fn) {
   const node = await ProxyNode.findByPk(req.params.id);
   if (!node) throw new HttpError(404, '節點不存在');
   if (String(req.body?.confirmName || '').trim() !== node.NodeName) throw new HttpError(400, '確認名稱與節點名稱不符');
   try {
-    const r = await nodeReboot.rebootNode(node);
-    healthService.clearUpdates(node.Id);
-    await audit.record(req, { action: 'REBOOT', targetType: 'NODE', targetId: node.Id, targetName: nodeName(node), detail: { 指令: config.ssh.rebootCmd } });
-    res.json({ ok: true, ...r });
+    const r = await fn(node);
+    await audit.record(req, { action, targetType: 'NODE', targetId: node.Id, targetName: nodeName(node), detail: { 指令: cmd } });
+    return { node, r };
   } catch (e) {
-    if (e instanceof nodeReboot.RebootError) {
-      await audit.record(req, { action: 'REBOOT', targetType: 'NODE', targetId: node.Id, targetName: nodeName(node), detail: { status: '失敗', message: e.message } });
+    if (e instanceof nodeOps.NodeOpError) {
+      await audit.record(req, { action, targetType: 'NODE', targetId: node.Id, targetName: nodeName(node), detail: { status: '失敗', message: e.message } });
       throw new HttpError(e.status, e.message);
     }
+    throw e;
+  }
+}
+
+router.post('/nodes/:id/reboot', wrap(async (req, res) => {
+  const { node, r } = await runNodeOp(req, 'REBOOT', config.ssh.rebootCmd, (n) => nodeOps.rebootNode(n));
+  healthService.clearUpdates(node.Id);
+  res.json({ ok: true, ...r });
+}));
+
+/** 更新套件：在節點背景執行，立即回應；進度以 GET /nodes/:id/upgrade 讀取 */
+router.post('/nodes/:id/upgrade', wrap(async (req, res) => {
+  const { r } = await runNodeOp(req, 'UPGRADE', config.ssh.upgradeCmd, (n) => nodeOps.startUpgrade(n));
+  res.json({ ok: true, ...r });
+}));
+
+router.get('/nodes/:id/upgrade', wrap(async (req, res) => {
+  const node = await ProxyNode.findByPk(req.params.id);
+  if (!node) throw new HttpError(404, '節點不存在');
+  try {
+    const st = await nodeOps.upgradeStatus(node);
+    if (st.justFinished) {
+      healthService.clearUpdates(node.Id); // 下一次健康檢查重新取得可更新套件與「需要重開機」
+      await audit.record(req, {
+        action: 'UPGRADE', targetType: 'NODE', targetId: node.Id, targetName: nodeName(node),
+        detail: { status: st.result === 'OK' ? '完成' : `失敗${st.failStep ? `（${st.failStep}）` : ''}`, 需要重開機: st.rebootPkgs ? st.rebootPkgs.join(' ') || '是' : '否' },
+      });
+    }
+    res.json(st);
+  } catch (e) {
+    if (e instanceof nodeOps.NodeOpError) throw new HttpError(e.status, e.message);
     throw e;
   }
 }));
@@ -750,6 +780,8 @@ router.get('/deploy/events', (req, res) => {
 });
 
 router.post('/deploy', wrap(async (req, res) => {
+  // 節點更新套件時 nginx 可能被重啟，部署的 nginx -t / reload 會失敗而回滾，先擋下
+  if (nodeOps.anyUpgrading()) throw new HttpError(409, '有節點正在更新套件，請等更新完成再部署');
   const result = await deployService.deploy({
     triggeredBy: String(req.user?.username || 'unknown').slice(0, 100),
     triggerIp: req.ip,

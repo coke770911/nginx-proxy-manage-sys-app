@@ -136,6 +136,7 @@ const AUDIT_ACTION = {
   DEPLOY: { type: 'info', text: '部署' },
   CUTOVER_CHECK: { type: 'info', text: '切換前檢查' },
   REBOOT: { type: 'danger', text: '節點重開機' },
+  UPGRADE: { type: 'warning', text: '節點更新套件' },
 };
 const AUDIT_TARGET = { AUTH: '登入', RULE: '網域規則', CERT: 'SSL 憑證', NODE: 'Nginx 節點', DEPLOY: '部署', ACCOUNT: '帳號管理', WAF: 'WAF 設定', IP: 'IP 存取控制' };
 const audit = reactive({ q: '', action: '', targetType: '', range: null, page: 1, pageSize: 50, total: 0, rows: [], loading: false });
@@ -464,6 +465,78 @@ async function rebootNode(n) {
     ElMessage.error({ message: e.message, duration: 8000 });
   } finally { rebooting[n.Id] = false; }
 }
+
+/* 更新套件：節點背景執行 apt-get update + full-upgrade，這裡每 3 秒讀一次進度 Log */
+const upgDlg = reactive({ visible: false, node: null, st: null, error: '', starting: false });
+const upgLogRef = ref();
+let upgTimer = null;
+const stopUpgPoll = () => { clearTimeout(upgTimer); upgTimer = null; };
+async function pollUpgrade() {
+  stopUpgPoll();
+  if (!upgDlg.visible || !upgDlg.node) return;
+  try {
+    upgDlg.st = await api.get(`/nodes/${upgDlg.node.Id}/upgrade`);
+    upgDlg.error = '';
+    await nextTick();
+    if (upgLogRef.value) upgLogRef.value.scrollTop = upgLogRef.value.scrollHeight;
+    if (upgDlg.st.justFinished || (!upgDlg.st.running && upgDlg.st.result)) {
+      if (upgDlg.st.justFinished) checkNodes(); // 重新取得可更新套件數與「需要重開機」
+      return;
+    }
+  } catch (e) { upgDlg.error = e.message; }
+  if (upgDlg.st?.running || upgDlg.starting) upgTimer = setTimeout(pollUpgrade, 3000);
+}
+async function openUpgrade(n) {
+  Object.assign(upgDlg, { node: n, st: null, error: '', starting: false });
+  let st = null;
+  try { st = await api.get(`/nodes/${n.Id}/upgrade`); } catch (e) { ElMessage.error(e.message); return; }
+  if (!st.running) {
+    if (!st.installed) {
+      ElMessageBox.alert('節點尚未安裝更新腳本。請以 sysadmin 在節點執行 nginx-node-ops 技能的 install-node-upgrade.sh（會一併設定 sudoers），完成後再按一次。', '尚未安裝更新腳本', { type: 'warning' });
+      return;
+    }
+    const u = nodeUpd(n);
+    const others = nodes.value.filter((x) => x.IsActive && x.Id !== n.Id).map((x) => x.NodeName).join('、');
+    try {
+      await ElMessageBox.prompt(
+        `確定要更新節點「${escHtml(n.NodeName)}」的套件？${u ? `（目前可更新 ${escHtml(u.count)} 個）` : ''}<br>`
+          + '將執行 apt-get update + full-upgrade（設定檔衝突時保留現有設定），約需數分鐘；'
+          + `更新到 nginx / OpenSSL 時 nginx 會重啟幾秒${others ? `，流量會由 F5 轉給 ${escHtml(others)}` : '，<b style="color:#f56c6c">這是唯一節點，期間網站可能短暫中斷</b>'}。<br>`
+          + '更新期間不可部署，也不可同時更新另一台。<br><br>請輸入節點名稱確認：',
+        '更新套件',
+        {
+          type: 'warning', dangerouslyUseHTMLString: true, confirmButtonText: '開始更新', cancelButtonText: '取消',
+          inputPlaceholder: n.NodeName,
+          inputValidator: (v) => (String(v || '').trim() === n.NodeName ? true : '請輸入完全相同的節點名稱'),
+        },
+      );
+    } catch { return; }
+    upgDlg.starting = true;
+    try {
+      const r = await api.post(`/nodes/${n.Id}/upgrade`, { confirmName: n.NodeName });
+      ElMessage.success(r.already ? '節點已在更新中，顯示目前進度' : '已開始更新，視窗會即時顯示進度（關閉視窗不影響節點上的更新）');
+    } catch (e) {
+      upgDlg.starting = false;
+      ElMessage.error({ message: e.message, duration: 8000 });
+      return;
+    }
+    // 腳本剛啟動時 Log 可能還是上一次的內容，先清空畫面
+    st = { running: true, lines: [], result: null };
+  }
+  upgDlg.st = st;
+  upgDlg.visible = true;
+  setTimeout(() => { upgDlg.starting = false; }, 20000);
+  upgTimer = setTimeout(pollUpgrade, st.running ? 2000 : 0);
+}
+const upgState = computed(() => {
+  const st = upgDlg.st;
+  if (!st) return { type: 'info', text: '讀取中' };
+  if (st.running) return { type: 'primary', text: '更新中' };
+  if (st.result === 'OK') return { type: 'success', text: '完成' };
+  if (st.result === 'FAIL') return { type: 'danger', text: `失敗${st.failStep ? `（${st.failStep}）` : ''}` };
+  return { type: 'info', text: '沒有進行中的更新' };
+});
+onBeforeUnmount(stopUpgPoll);
 
 async function toggleNode(n, v) {
   try {
@@ -1179,6 +1252,9 @@ onMounted(() => {
           <el-switch :model-value="n.IsActive" size="small" title="啟用 / 停用節點" @change="(v) => toggleNode(n, v)" />
         </div>
         <div class="node-actions">
+          <el-button size="small" :icon="Download" text :disabled="!n.IsActive"
+                     :title="nodeUpd(n)?.packages?.length ? `安裝 ${nodeUpd(n).count} 個可更新套件（apt full-upgrade）` : '更新套件 / 查看上次更新紀錄'"
+                     :class="{ 'upg-hot': nodeUpd(n)?.security }" @click="openUpgrade(n)">更新套件</el-button>
           <el-button size="small" :icon="RefreshRight" text :loading="rebooting[n.Id]" :disabled="!n.IsActive"
                      :title="nodeUpd(n)?.rebootRequired ? '有更新需要重開機才生效' : '遠端重開機此節點'" :class="{ 'reboot-hot': nodeUpd(n)?.rebootRequired }"
                      @click="rebootNode(n)">重開機</el-button>
@@ -1977,6 +2053,27 @@ onMounted(() => {
       </template>
     </el-dialog>
 
+    <!-- 節點更新套件進度 -->
+    <el-dialog v-model="upgDlg.visible" :title="`更新套件 — ${upgDlg.node?.NodeName || ''}`" width="760px" top="6vh" class="rwd-dialog" @closed="stopUpgPoll">
+      <div class="upg-head">
+        <el-tag :type="upgState.type" effect="dark">{{ upgState.text }}</el-tag>
+        <span v-if="upgDlg.st?.logAt" class="hint">Log 更新於 {{ fmt(upgDlg.st.logAt) }}</span>
+        <span v-if="upgDlg.st?.running" class="hint">每 3 秒自動更新；關閉視窗不影響節點上的更新</span>
+      </div>
+      <el-alert v-if="upgDlg.error" type="error" :closable="false" show-icon :title="upgDlg.error" class="upg-alert" />
+      <el-alert v-if="upgDlg.st && !upgDlg.st.running && upgDlg.st.rebootPkgs" type="warning" :closable="false" show-icon class="upg-alert"
+                :title="`更新完成，需要重開機才會生效：${upgDlg.st.rebootPkgs.join('、') || '（未列出套件）'}`">
+        <el-button size="small" type="danger" :icon="RefreshRight" @click="rebootNode(upgDlg.node)">重開機此節點</el-button>
+      </el-alert>
+      <el-alert v-if="upgDlg.st?.result === 'FAIL'" type="error" :closable="false" show-icon class="upg-alert"
+                title="更新失敗，請看下方 Log 的錯誤訊息；nginx -t 失敗時請先以 sysadmin 登入節點排除，再部署。" />
+      <pre ref="upgLogRef" class="upg-log">{{ (upgDlg.st?.lines || []).join('\n') || (upgDlg.st?.running ? '等待節點輸出…' : '節點上沒有更新紀錄') }}</pre>
+      <template #footer>
+        <el-button :icon="Refresh" :disabled="upgDlg.st?.running" @click="pollUpgrade">重新讀取</el-button>
+        <el-button type="primary" @click="upgDlg.visible = false">關閉</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 節點編輯 -->
     <el-dialog v-model="nodeDlg.visible" :title="nodeDlg.id ? '編輯 Nginx 節點' : '新增 Nginx 節點'" width="640px" class="rwd-dialog">
       <el-form ref="nodeFormRef" :model="nodeDlg.form" :rules="nodeRules" label-width="120px">
@@ -2208,7 +2305,11 @@ onMounted(() => {
 .upd-pop { max-height: 360px; overflow: auto; display: flex; flex-direction: column; gap: 4px; }
 .upd-pkg { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
 .upd-ver { color: #888; font-size: 11px; }
-.reboot-hot { color: #f56c6c; }
+.reboot-hot, .upg-hot { color: #f56c6c; }
+.upg-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.upg-alert { margin-bottom: 10px; }
+.upg-log { margin: 0; height: 420px; overflow: auto; background: #1e1e1e; color: #ddd; padding: 10px 12px; border-radius: 4px;
+  font-family: ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
 .domain-link { color: var(--el-color-primary); text-decoration: none; word-break: break-all; }
 .domain-link:hover { text-decoration: underline; }
 .alias-tag { margin-left: 6px; cursor: pointer; vertical-align: middle; }

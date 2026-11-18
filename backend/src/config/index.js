@@ -100,5 +100,7 @@ module.exports = {
     reloadCmd: process.env.NGINX_RELOAD_CMD || 'sudo /usr/bin/systemctl reload nginx',
     // 節點重開機（管理介面按鈕）；sudo -n：未授權時直接失敗，不會等密碼
     rebootCmd: process.env.NODE_REBOOT_CMD || 'sudo -n /usr/bin/systemctl reboot',
+    // 節點更新套件（管理介面按鈕）：節點腳本在背景執行 apt-get update + full-upgrade，見 nginx-node-ops/install-node-upgrade.sh
+    upgradeCmd: process.env.NODE_UPGRADE_CMD || 'sudo -n /usr/local/sbin/npm-node-upgrade start',
   },
 };
