@@ -387,6 +387,21 @@ router.post('/rules', wrap(async (req, res) => {
   res.status(201).json(await loadRule(created.Id));
 }));
 
+/**
+ * 寫入規則欄位。UpdatedAt 是清單「最後更動」與「有尚未部署的變更」的判斷依據：
+ * 只改申請單欄位或備註（不影響 Nginx 行為；備註只是設定檔開頭的註解，下次部署時一併更新）時不更新 UpdatedAt；
+ * 只改後端主機時規則本身欄位可能不變，仍要更新 UpdatedAt。
+ */
+const NO_DEPLOY_KEYS = new Set([...applicant.KEYS, 'Remark']);
+async function saveRuleFields(rule, values, upsChanged, t) {
+  rule.set(values);
+  const changed = rule.changed() || [];
+  const affectsDeploy = upsChanged || changed.some((k) => !NO_DEPLOY_KEYS.has(k));
+  if (upsChanged) rule.set('UpdatedAt', new Date());
+  if (!changed.length && !upsChanged) return;
+  await rule.save({ transaction: t, silent: !affectsDeploy });
+}
+
 router.put('/rules/:id', wrap(async (req, res) => {
   const rule = await loadRule(req.params.id);
   if (!rule) throw new HttpError(404, '規則不存在');
@@ -399,7 +414,7 @@ router.put('/rules/:id', wrap(async (req, res) => {
   // 只改後端主機時規則本身欄位不變，仍要更新 UpdatedAt（清單「最後更動」與「尚未部署」提示依此判斷）
   const upsChanged = !!ups && upText(ups) !== upText(beforeUps);
   await sequelize.transaction(async (t) => {
-    await rule.update({ ...data, ...(ups ? primaryOf(ups) : {}), ...(upsChanged ? { UpdatedAt: new Date() } : {}) }, { transaction: t });
+    await saveRuleFields(rule, { ...data, ...(ups ? primaryOf(ups) : {}) }, upsChanged, t);
     if (ups) await replaceUpstreams(rule.Id, ups, t);
   });
   const detail = audit.diff({ ...before }, data);
@@ -488,7 +503,7 @@ router.post('/rules/import', wrap(async (req, res) => {
         const before = { ...rule.get({ plain: true }) };
         const beforeUps = (before.Upstreams || []).map((u) => ({ ...u }));
         const upsChanged = upText(ups) !== upText(beforeUps);
-        await rule.update({ ...fields, ...primaryOf(ups), ...(upsChanged ? { UpdatedAt: new Date() } : {}) }, { transaction: t });
+        await saveRuleFields(rule, { ...fields, ...primaryOf(ups) }, upsChanged, t);
         await replaceUpstreams(rule.Id, ups, t);
         const detail = { ...audit.diff(before, fields), 來源: 'CSV 匯入' };
         if (upsChanged) detail.Upstreams = [upText(beforeUps), upText(ups)];
